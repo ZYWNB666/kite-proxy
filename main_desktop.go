@@ -17,19 +17,23 @@ import (
 //go:embed all:ui/dist
 var assets embed.FS
 
+//go:embed build/windows/icon.ico
+var trayIcon []byte
+
 func main() {
 	// 解析命令行参数（用于调试）
 	debug := flag.Bool("debug", false, "Enable debug mode")
 	flag.Parse()
 
 	// 创建应用实例
-	app := desktop.NewApp()
+	app := desktop.NewApp(trayIcon)
 
 	// 应用配置
 	err := wails.Run(&options.App{
-		Title:  "Kite Proxy",
-		Width:  1200,
-		Height: 800,
+		Title:             "Kite Proxy",
+		Width:             1200,
+		Height:            800,
+		HideWindowOnClose: true,
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 		},

@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react'
 import { toast } from 'sonner'
-import { Plus, Play, Square, Trash2, RefreshCw } from 'lucide-react'
+import { Plus, Play, Square, Trash2, RefreshCw, Copy, Check, Loader2, ExternalLink } from 'lucide-react'
+import { useI18n } from '../i18n'
+import ConfirmDialog from '../components/ConfirmDialog'
 
 // 端口映射信息
 interface PortMapping {
@@ -38,6 +40,7 @@ interface PodInfo {
 }
 
 export default function UsagePage() {
+  const { t } = useI18n()
   // 表单状态
   const [selectedCluster, setSelectedCluster] = useState('')
   const [selectedNamespace, setSelectedNamespace] = useState('')
@@ -58,6 +61,9 @@ export default function UsagePage() {
   const [loadingNamespaces, setLoadingNamespaces] = useState(false)
   const [loadingResources, setLoadingResources] = useState(false)
   const [loadingMappings, setLoadingMappings] = useState(false)
+  const [addingMapping, setAddingMapping] = useState(false)
+  const [copiedId, setCopiedId] = useState<string | null>(null)
+  const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null)
 
   // 检测是否在桌面环境
   const isDesktop = typeof window !== 'undefined' && 'go' in window
@@ -98,7 +104,7 @@ export default function UsagePage() {
       const result = await window.go.desktop.App.ListClusters()
       setClusters(result || [])
     } catch (err) {
-      toast.error(`Failed to load clusters: ${String(err)}`)
+      toast.error(`${t.failedToLoad}: ${String(err)}`)
     } finally {
       setLoadingClusters(false)
     }
@@ -112,7 +118,7 @@ export default function UsagePage() {
       const result = await window.go.desktop.App.GetNamespaces(selectedCluster)
       setNamespaces(result || [])
     } catch (err) {
-      toast.error(`Failed to load namespaces: ${String(err)}`)
+      toast.error(`${t.failedToLoad}: ${String(err)}`)
     } finally {
       setLoadingNamespaces(false)
     }
@@ -134,7 +140,7 @@ export default function UsagePage() {
         setServices([])
       }
     } catch (err) {
-      toast.error(`Failed to load resources: ${String(err)}`)
+      toast.error(`${t.failedToLoad}: ${String(err)}`)
     } finally {
       setLoadingResources(false)
     }
@@ -148,7 +154,7 @@ export default function UsagePage() {
       const result = await window.go.desktop.App.ListPortMappings()
       setMappings(result || [])
     } catch (err) {
-      toast.error(`Failed to load mappings: ${String(err)}`)
+      toast.error(`${t.failedToLoad}: ${String(err)}`)
     } finally {
       setLoadingMappings(false)
     }
@@ -157,10 +163,11 @@ export default function UsagePage() {
   async function handleAddMapping() {
     if (!isDesktop) return
     if (!selectedCluster || !selectedNamespace || !selectedResource || !selectedRemotePort) {
-      toast.error('Please fill all required fields')
+      toast.error(t.fillAllFields)
       return
     }
 
+    setAddingMapping(true)
     try {
       // @ts-ignore
       await window.go.desktop.App.AddPortMapping(
@@ -171,14 +178,35 @@ export default function UsagePage() {
         selectedRemotePort,
         localPort || 0
       )
-      toast.success('Port mapping added successfully')
+      toast.success(t.mappingAdded)
       void loadMappings()
-      // 重置表单
       setSelectedResource('')
       setSelectedRemotePort('')
       setLocalPort('')
     } catch (err) {
-      toast.error(`Failed to add mapping: ${String(err)}`)
+      toast.error(`${t.failedToAdd}: ${String(err)}`)
+    } finally {
+      setAddingMapping(false)
+    }
+  }
+
+  async function handleCopyURL(mapping: PortMapping) {
+    const url = `http://localhost:${mapping.localPort}`
+    try {
+      await navigator.clipboard.writeText(url)
+      setCopiedId(mapping.id)
+      setTimeout(() => setCopiedId(null), 2000)
+    } catch {
+      toast.error(t.failedToCopy)
+    }
+  }
+
+  function handleOpenBrowser(url: string) {
+    if (isDesktop) {
+      // @ts-ignore
+      void window.go.desktop.App.OpenBrowser(url)
+    } else {
+      window.open(url, '_blank', 'noreferrer')
     }
   }
 
@@ -187,10 +215,10 @@ export default function UsagePage() {
     try {
       // @ts-ignore
       await window.go.desktop.App.StartPortMapping(id)
-      toast.success('Port mapping started')
+      toast.success(t.mappingStarted)
       void loadMappings()
     } catch (err) {
-      toast.error(`Failed to start mapping: ${String(err)}`)
+      toast.error(`${t.failedToStart}: ${String(err)}`)
     }
   }
 
@@ -199,23 +227,22 @@ export default function UsagePage() {
     try {
       // @ts-ignore
       await window.go.desktop.App.StopPortMapping(id)
-      toast.success('Port mapping stopped')
+      toast.success(t.mappingStopped)
       void loadMappings()
     } catch (err) {
-      toast.error(`Failed to stop mapping: ${String(err)}`)
+      toast.error(`${t.failedToStop}: ${String(err)}`)
     }
   }
 
   async function handleRemoveMapping(id: string) {
     if (!isDesktop) return
-    if (!confirm('Are you sure you want to remove this mapping?')) return
     try {
       // @ts-ignore
       await window.go.desktop.App.RemovePortMapping(id)
-      toast.success('Port mapping removed')
+      toast.success(t.mappingRemoved)
       void loadMappings()
     } catch (err) {
-      toast.error(`Failed to remove mapping: ${String(err)}`)
+      toast.error(`${t.failedToRemove}: ${String(err)}`)
     }
   }
 
@@ -228,48 +255,61 @@ export default function UsagePage() {
   if (!isDesktop) {
     return (
       <div className="p-8 text-center">
-        <p className="text-gray-500">Port forwarding is only available in desktop mode</p>
+        <p className="text-gray-500">{t.desktopOnly}</p>
       </div>
     )
   }
 
   return (
     <div className="p-6">
+      <ConfirmDialog
+        open={confirmRemoveId !== null}
+        message={t.confirmRemove}
+        danger
+        onConfirm={() => {
+          if (confirmRemoveId) void handleRemoveMapping(confirmRemoveId)
+          setConfirmRemoveId(null)
+        }}
+        onCancel={() => setConfirmRemoveId(null)}
+      />
+
       <div className="mb-6 flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold">Port Forwarding</h1>
-          <p className="text-sm text-gray-500 mt-1">
-            Forward ports from Kubernetes services/pods to your local machine
+          <h1 className="text-2xl font-bold dark:text-white">{t.portForwarding}</h1>
+          <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+            {t.portForwardingDescription}
           </p>
         </div>
         <button
           onClick={() => void loadMappings()}
           disabled={loadingMappings}
-          className="flex items-center gap-2 px-3 py-2 text-sm border rounded-md hover:bg-gray-50 disabled:opacity-50"
+          className="flex items-center gap-2 px-3 py-2 text-sm border dark:border-gray-600
+            dark:text-gray-300 rounded-md hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-50"
         >
           <RefreshCw size={16} className={loadingMappings ? 'animate-spin' : ''} />
-          Refresh
+          {t.refresh}
         </button>
       </div>
 
       {/* 添加端口映射表单 */}
-      <div className="bg-white border rounded-lg p-6 mb-6">
-        <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
+      <div className="bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-lg p-6 mb-6">
+        <h2 className="text-lg font-semibold mb-4 flex items-center gap-2 dark:text-white">
           <Plus size={18} />
-          Add Port Mapping
+          {t.addMapping}
         </h2>
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {/* 集群选择 */}
           <div>
-            <label className="block text-sm font-medium mb-1">Cluster *</label>
+            <label className="block text-sm font-medium mb-1 dark:text-gray-200">{t.cluster} *</label>
             <select
               value={selectedCluster}
               onChange={(e) => setSelectedCluster(e.target.value)}
               disabled={loadingClusters}
-              className="w-full px-3 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+              className="w-full px-3 py-2 border dark:border-gray-600 rounded-md bg-white dark:bg-gray-700
+                text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
             >
-              <option value="">Select cluster...</option>
+              <option value="">{t.selectCluster}</option>
               {clusters.map(c => (
                 <option key={c.name} value={c.name}>{c.name}</option>
               ))}
@@ -278,14 +318,15 @@ export default function UsagePage() {
 
           {/* Namespace 选择 */}
           <div>
-            <label className="block text-sm font-medium mb-1">Namespace *</label>
+            <label className="block text-sm font-medium mb-1 dark:text-gray-200">{t.namespace} *</label>
             <select
               value={selectedNamespace}
               onChange={(e) => setSelectedNamespace(e.target.value)}
               disabled={!selectedCluster || loadingNamespaces}
-              className="w-full px-3 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+              className="w-full px-3 py-2 border dark:border-gray-600 rounded-md bg-white dark:bg-gray-700
+                text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
             >
-              <option value="">Select namespace...</option>
+              <option value="">{t.selectNamespace}</option>
               {namespaces.map(ns => (
                 <option key={ns.name} value={ns.name}>{ns.name}</option>
               ))}
@@ -294,12 +335,13 @@ export default function UsagePage() {
 
           {/* 资源类型 */}
           <div>
-            <label className="block text-sm font-medium mb-1">Resource Type *</label>
+            <label className="block text-sm font-medium mb-1 dark:text-gray-200">{t.resourceType} *</label>
             <select
               value={resourceType}
               onChange={(e) => setResourceType(e.target.value as 'service' | 'pod')}
               disabled={!selectedNamespace}
-              className="w-full px-3 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+              className="w-full px-3 py-2 border dark:border-gray-600 rounded-md bg-white dark:bg-gray-700
+                text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
             >
               <option value="service">Service</option>
               <option value="pod">Pod</option>
@@ -308,7 +350,7 @@ export default function UsagePage() {
 
           {/* 资源选择 */}
           <div>
-            <label className="block text-sm font-medium mb-1">
+            <label className="block text-sm font-medium mb-1 dark:text-gray-200">
               {resourceType === 'service' ? 'Service' : 'Pod'} *
             </label>
             <select
@@ -318,9 +360,10 @@ export default function UsagePage() {
                 setSelectedRemotePort('')
               }}
               disabled={!selectedNamespace || loadingResources}
-              className="w-full px-3 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+              className="w-full px-3 py-2 border dark:border-gray-600 rounded-md bg-white dark:bg-gray-700
+                text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
             >
-              <option value="">Select {resourceType}...</option>
+              <option value="">{t.selectResource}</option>
               {resources.map(r => (
                 <option key={r.name} value={r.name}>
                   {r.name}
@@ -332,14 +375,15 @@ export default function UsagePage() {
 
           {/* 远程端口 */}
           <div>
-            <label className="block text-sm font-medium mb-1">Remote Port *</label>
+            <label className="block text-sm font-medium mb-1 dark:text-gray-200">{t.remotePort} *</label>
             <select
               value={selectedRemotePort}
               onChange={(e) => setSelectedRemotePort(Number(e.target.value))}
               disabled={!selectedResource}
-              className="w-full px-3 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+              className="w-full px-3 py-2 border dark:border-gray-600 rounded-md bg-white dark:bg-gray-700
+                text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
             >
-              <option value="">Select port...</option>
+              <option value="">{t.selectPort}</option>
               {selectedResourcePorts.map((p, idx) => (
                 <option key={idx} value={p.port}>
                   {p.port} {p.name && `(${p.name})`} - {p.protocol}
@@ -350,15 +394,16 @@ export default function UsagePage() {
 
           {/* 本地端口 */}
           <div>
-            <label className="block text-sm font-medium mb-1">Local Port (empty = random)</label>
+            <label className="block text-sm font-medium mb-1 dark:text-gray-200">{t.localPort}</label>
             <input
               type="number"
               value={localPort}
               onChange={(e) => setLocalPort(e.target.value ? Number(e.target.value) : '')}
-              placeholder="Random"
+              placeholder={t.randomPort}
               min="1024"
               max="65535"
-              className="w-full px-3 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full px-3 py-2 border dark:border-gray-600 rounded-md bg-white dark:bg-gray-700
+                text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
           </div>
         </div>
@@ -366,60 +411,81 @@ export default function UsagePage() {
         <div className="mt-4">
           <button
             onClick={() => void handleAddMapping()}
-            disabled={!selectedCluster || !selectedNamespace || !selectedResource || !selectedRemotePort}
-            className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            disabled={!selectedCluster || !selectedNamespace || !selectedResource || !selectedRemotePort || addingMapping}
+            className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-md
+              hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            <Plus size={16} />
-            Add Mapping
+            {addingMapping ? (
+              <Loader2 size={16} className="animate-spin" />
+            ) : (
+              <Plus size={16} />
+            )}
+            {addingMapping ? t.connecting : t.addMapping}
           </button>
         </div>
       </div>
 
       {/* 端口映射列表 */}
-      <div className="bg-white border rounded-lg overflow-hidden">
-        <div className="px-6 py-4 border-b bg-gray-50">
-          <h2 className="text-lg font-semibold">Active Port Mappings</h2>
+      <div className="bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-lg overflow-hidden">
+        <div className="px-6 py-4 border-b dark:border-gray-700 bg-gray-50 dark:bg-gray-900/50">
+          <h2 className="text-lg font-semibold dark:text-white">{t.activeMappings}</h2>
         </div>
 
         {mappings.length === 0 ? (
-          <div className="p-8 text-center text-gray-500">
-            No port mappings yet. Add one above to get started!
+          <div className="p-8 text-center text-gray-500 dark:text-gray-400">
+            {t.noMappings}
           </div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full">
-              <thead className="bg-gray-50 border-b">
+              <thead className="bg-gray-50 dark:bg-gray-900/50 border-b dark:border-gray-700">
                 <tr>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Resource</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Ports</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">{t.resource}</th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">{t.localURL}</th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">{t.remotePort}</th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">{t.status}</th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">{t.actions}</th>
                 </tr>
               </thead>
-              <tbody className="divide-y">
+              <tbody className="divide-y dark:divide-gray-700">
                 {mappings.map(mapping => (
-                  <tr key={mapping.id} className="hover:bg-gray-50">
+                  <tr key={mapping.id} className="hover:bg-gray-50 dark:hover:bg-gray-700/50">
                     <td className="px-6 py-4">
-                      <div className="text-sm font-medium">{mapping.resourceType}/{mapping.resourceName}</div>
-                      <div className="text-xs text-gray-500">{mapping.cluster} / {mapping.namespace}</div>
+                      <div className="text-sm font-medium dark:text-white">{mapping.resourceType}/{mapping.resourceName}</div>
+                      <div className="text-xs text-gray-500 dark:text-gray-400">{mapping.cluster} / {mapping.namespace}</div>
                     </td>
                     <td className="px-6 py-4">
-                      <div className="text-sm">
-                        <span className="font-mono">localhost:{mapping.localPort}</span>
-                        <span className="text-gray-400 mx-2">→</span>
-                        <span className="font-mono">{mapping.remotePort}</span>
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-sm dark:text-gray-200">http://localhost:{mapping.localPort}</span>
+                        <button
+                          onClick={() => void handleCopyURL(mapping)}
+                          className="p-1 text-gray-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/30 rounded transition-colors"
+                          title={t.copyURL}
+                        >
+                          {copiedId === mapping.id ? <Check size={14} className="text-green-600" /> : <Copy size={14} />}
+                        </button>
+                        <button
+                          onClick={() => handleOpenBrowser(`http://localhost:${mapping.localPort}`)}
+                          className="p-1 text-gray-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/30 rounded transition-colors"
+                          title={t.openInBrowser}
+                        >
+                          <ExternalLink size={14} />
+                        </button>
                       </div>
                     </td>
                     <td className="px-6 py-4">
+                      <span className="font-mono text-sm dark:text-gray-200">{mapping.remotePort}</span>
+                    </td>
+                    <td className="px-6 py-4">
                       <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
-                        mapping.status === 'running' ? 'bg-green-100 text-green-800' :
-                        mapping.status === 'stopped' ? 'bg-gray-100 text-gray-800' :
-                        'bg-red-100 text-red-800'
+                        mapping.status === 'running' ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400' :
+                        mapping.status === 'stopped' ? 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300' :
+                        'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400'
                       }`}>
                         {mapping.status}
                       </span>
                       {mapping.error && (
-                        <div className="text-xs text-red-600 mt-1">{mapping.error}</div>
+                        <div className="text-xs text-red-600 dark:text-red-400 mt-1">{mapping.error}</div>
                       )}
                     </td>
                     <td className="px-6 py-4">
@@ -427,24 +493,24 @@ export default function UsagePage() {
                         {mapping.status === 'running' ? (
                           <button
                             onClick={() => void handleStopMapping(mapping.id)}
-                            className="p-1.5 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded"
-                            title="Stop"
+                            className="p-1.5 text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-700 rounded"
+                            title={t.stop}
                           >
                             <Square size={16} />
                           </button>
                         ) : (
                           <button
                             onClick={() => void handleStartMapping(mapping.id)}
-                            className="p-1.5 text-green-600 hover:text-green-900 hover:bg-green-50 rounded"
-                            title="Start"
+                            className="p-1.5 text-green-600 dark:text-green-400 hover:text-green-900 dark:hover:text-green-300 hover:bg-green-50 dark:hover:bg-green-900/30 rounded"
+                            title={t.start}
                           >
                             <Play size={16} />
                           </button>
                         )}
                         <button
-                          onClick={() => void handleRemoveMapping(mapping.id)}
-                          className="p-1.5 text-red-600 hover:text-red-900 hover:bg-red-50 rounded"
-                          title="Remove"
+                          onClick={() => setConfirmRemoveId(mapping.id)}
+                          className="p-1.5 text-red-600 dark:text-red-400 hover:text-red-900 dark:hover:text-red-300 hover:bg-red-50 dark:hover:bg-red-900/30 rounded"
+                          title={t.remove}
                         >
                           <Trash2 size={16} />
                         </button>

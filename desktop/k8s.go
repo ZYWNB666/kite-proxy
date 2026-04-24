@@ -42,8 +42,8 @@ type PortInfo struct {
 
 // GetNamespaces 获取指定集群的所有 namespace
 func (a *App) GetNamespaces(clusterName string) ([]NamespaceInfo, error) {
-	if a.client == nil {
-		return nil, fmt.Errorf("not configured")
+	if err := a.checkAuth(); err != nil {
+		return nil, err
 	}
 
 	// 获取集群的 rest.Config
@@ -78,8 +78,8 @@ func (a *App) GetNamespaces(clusterName string) ([]NamespaceInfo, error) {
 
 // GetServices 获取指定集群和 namespace 的所有 services
 func (a *App) GetServices(clusterName, namespace string) ([]ServiceInfo, error) {
-	if a.client == nil {
-		return nil, fmt.Errorf("not configured")
+	if err := a.checkAuth(); err != nil {
+		return nil, err
 	}
 	if namespace == "" {
 		return nil, fmt.Errorf("namespace is required")
@@ -130,8 +130,8 @@ func (a *App) GetServices(clusterName, namespace string) ([]ServiceInfo, error) 
 
 // GetPods 获取指定集群和 namespace 的所有 pods
 func (a *App) GetPods(clusterName, namespace string) ([]PodInfo, error) {
-	if a.client == nil {
-		return nil, fmt.Errorf("not configured")
+	if err := a.checkAuth(); err != nil {
+		return nil, err
 	}
 	if namespace == "" {
 		return nil, fmt.Errorf("namespace is required")

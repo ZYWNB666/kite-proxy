@@ -2,7 +2,12 @@ package desktop
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 	"github.com/zxh326/kite-proxy/pkg/api"
@@ -15,6 +20,23 @@ type Config struct {
 	APIKey  string
 }
 
+// PersistedConfig is the on-disk representation of the config
+type PersistedConfig struct {
+	KiteURL  string `json:"kiteURL"`
+	APIKey   string `json:"apiKey"`
+	Language string `json:"language"` // "en" | "zh"
+	Theme    string `json:"theme"`    // "light" | "dark"
+}
+
+// configFilePath returns the path to the persisted config file
+func configFilePath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".kite-proxy", "config.json")
+}
+
 // ClusterInfo describes a cluster
 type ClusterInfo struct {
 	Name   string `json:"name"`
@@ -23,17 +45,25 @@ type ClusterInfo struct {
 
 // App 是桌面应用的结构体
 type App struct {
-	ctx         context.Context
-	config      *Config
-	cache       *KubeconfigCache
-	client      *api.Client
-	portManager *PortForwardManager
+	ctx            context.Context
+	config         *Config
+	cache          *KubeconfigCache
+	client         *api.Client
+	portManager    *PortForwardManager
+	trayIcon       []byte
+	uiLanguage     string
+	uiTheme        string
+	authMu         sync.Mutex
+	lastAuthCheck  time.Time
+	stopAuthLoop   chan struct{}
 }
 
 // NewApp 创建一个新的 App 应用实例
-func NewApp() *App {
+func NewApp(trayIcon []byte) *App {
 	app := &App{
-		cache: NewKubeconfigCache(),
+		cache:        NewKubeconfigCache(),
+		trayIcon:     trayIcon,
+		stopAuthLoop: make(chan struct{}),
 	}
 	app.portManager = NewPortForwardManager(app)
 	return app
@@ -43,12 +73,88 @@ func NewApp() *App {
 func (a *App) Startup(ctx context.Context) {
 	a.ctx = ctx
 	klog.Info("Desktop app starting...")
-	// 桌面版不保存配置到磁盘，每次启动需要重新配置
+	// 从磁盘加载配置
+	a.loadConfigFromDisk()
+	// 启动 API key 定期校验
+	go a.startAuthLoop()
+	// 启动系统托盘
+	a.startTray()
+}
+
+// loadConfigFromDisk 从用户家目录加载配置
+func (a *App) loadConfigFromDisk() {
+	path := configFilePath()
+	if path == "" {
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			klog.Errorf("Failed to read config file: %v", err)
+		}
+		return
+	}
+	var cfg PersistedConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		klog.Errorf("Failed to parse config file: %v", err)
+		return
+	}
+	// 加载 UI 偏好
+	if cfg.Language != "" {
+		a.uiLanguage = cfg.Language
+	}
+	if cfg.Theme != "" {
+		a.uiTheme = cfg.Theme
+	}
+	if cfg.KiteURL != "" && cfg.APIKey != "" {
+		a.config = &Config{
+			KiteURL: cfg.KiteURL,
+			APIKey:  cfg.APIKey,
+		}
+		a.client = api.NewClient(cfg.KiteURL, cfg.APIKey)
+		klog.Infof("Loaded config from disk: kiteURL=%s", cfg.KiteURL)
+	}
+}
+
+// saveConfigToDisk 将配置持久化到用户家目录
+func (a *App) saveConfigToDisk() {
+	path := configFilePath()
+	if path == "" {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		klog.Errorf("Failed to create config directory: %v", err)
+		return
+	}
+	cfg := PersistedConfig{
+		Language: a.uiLanguage,
+		Theme:    a.uiTheme,
+	}
+	if a.config != nil {
+		cfg.KiteURL = a.config.KiteURL
+		cfg.APIKey = a.config.APIKey
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		klog.Errorf("Failed to marshal config: %v", err)
+		return
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		klog.Errorf("Failed to write config file: %v", err)
+	} else {
+		klog.Info("Config saved to disk")
+	}
 }
 
 // Shutdown 在应用关闭时调用
 func (a *App) Shutdown(ctx context.Context) {
 	klog.Info("Desktop app shutting down...")
+	// 停止 auth 校验循环
+	select {
+	case <-a.stopAuthLoop:
+	default:
+		close(a.stopAuthLoop)
+	}
 	// 停止所有端口转发
 	if a.portManager != nil {
 		a.portManager.StopAll()
@@ -102,16 +208,100 @@ func (a *App) SetConfig(kiteURL, apiKey string) error {
 
 	klog.Infof("Configuration updated: kiteURL=%s", kiteURL)
 
+	// 持久化配置到磁盘
+	a.saveConfigToDisk()
+
 	// 发送通知到前端
 	runtime.EventsEmit(a.ctx, "config:updated")
 
 	return nil
 }
 
+// checkAuth 校验 API key 是否有效（60秒内相同结果复用缓存）
+func (a *App) checkAuth() error {
+	if a.client == nil {
+		return fmt.Errorf("not configured")
+	}
+	a.authMu.Lock()
+	shouldCheck := time.Since(a.lastAuthCheck) > 60*time.Second
+	a.authMu.Unlock()
+	if !shouldCheck {
+		return nil
+	}
+	if err := a.client.Ping(context.Background()); err != nil {
+		if a.ctx != nil {
+			runtime.EventsEmit(a.ctx, "auth:unauthorized")
+		}
+		return fmt.Errorf("API key validation failed: %w", err)
+	}
+	a.authMu.Lock()
+	a.lastAuthCheck = time.Now()
+	a.authMu.Unlock()
+	return nil
+}
+
+// startAuthLoop 每 6 分钟主动校验一次 API key
+func (a *App) startAuthLoop() {
+	ticker := time.NewTicker(6 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			if a.client == nil {
+				continue
+			}
+			if err := a.client.Ping(context.Background()); err != nil {
+				klog.Warningf("Periodic auth check failed: %v", err)
+				a.authMu.Lock()
+				a.lastAuthCheck = time.Time{} // 清除缓存，强制下次重新校验
+				a.authMu.Unlock()
+				if a.ctx != nil {
+					runtime.EventsEmit(a.ctx, "auth:unauthorized")
+				}
+			} else {
+				a.authMu.Lock()
+				a.lastAuthCheck = time.Now()
+				a.authMu.Unlock()
+			}
+		case <-a.stopAuthLoop:
+			return
+		}
+	}
+}
+
+// OpenBrowser 使用系统默认浏览器打开 URL
+func (a *App) OpenBrowser(url string) {
+	runtime.BrowserOpenURL(a.ctx, url)
+}
+
+// GetUIPrefs 获取 UI 偏好（语言、主题）
+func (a *App) GetUIPrefs() map[string]string {
+	lang := a.uiLanguage
+	if lang == "" {
+		lang = "en"
+	}
+	theme := a.uiTheme
+	if theme == "" {
+		theme = "light"
+	}
+	return map[string]string{
+		"language": lang,
+		"theme":    theme,
+	}
+}
+
+// SetUIPrefs 保存 UI 偏好到磁盘
+func (a *App) SetUIPrefs(language, theme string) error {
+	a.uiLanguage = language
+	a.uiTheme = theme
+	a.saveConfigToDisk()
+	return nil
+}
+
 // ListClusters 获取可用的集群列表
 func (a *App) ListClusters() ([]ClusterInfo, error) {
-	if a.client == nil {
-		return nil, fmt.Errorf("not configured")
+	if err := a.checkAuth(); err != nil {
+		return nil, err
 	}
 
 	ctx := context.Background()
