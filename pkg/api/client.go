@@ -71,8 +71,8 @@ func (c *Client) GetKubeconfigs(ctx context.Context, clusterName string) (*Kubec
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// Set authentication header
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.apiKey))
+	// Set authentication header (kite expects API key directly, not "Bearer <key>")
+	req.Header.Set("Authorization", c.apiKey)
 	req.Header.Set("Accept", "application/json")
 
 	klog.V(2).Infof("Fetching kubeconfig from kite: %s", u.String())

@@ -23,17 +23,20 @@ type ClusterInfo struct {
 
 // App 是桌面应用的结构体
 type App struct {
-	ctx    context.Context
-	config *Config
-	cache  *KubeconfigCache
-	client *api.Client
+	ctx         context.Context
+	config      *Config
+	cache       *KubeconfigCache
+	client      *api.Client
+	portManager *PortForwardManager
 }
 
 // NewApp 创建一个新的 App 应用实例
 func NewApp() *App {
-	return &App{
+	app := &App{
 		cache: NewKubeconfigCache(),
 	}
+	app.portManager = NewPortForwardManager(app)
+	return app
 }
 
 // Startup 在应用启动时调用
@@ -46,6 +49,10 @@ func (a *App) Startup(ctx context.Context) {
 // Shutdown 在应用关闭时调用
 func (a *App) Shutdown(ctx context.Context) {
 	klog.Info("Desktop app shutting down...")
+	// 停止所有端口转发
+	if a.portManager != nil {
+		a.portManager.StopAll()
+	}
 	// 清除敏感数据
 	a.cache.Clear()
 }
@@ -198,4 +205,35 @@ func (a *App) ShowNotification(title, message string) {
 		"title":   title,
 		"message": message,
 	})
+}
+
+// ========== 端口映射管理 ==========
+
+// AddPortMapping 添加端口映射
+func (a *App) AddPortMapping(cluster, namespace, resourceType, resourceName string, remotePort, localPort int) (*PortMapping, error) {
+	if a.client == nil {
+		return nil, fmt.Errorf("not configured")
+	}
+
+	return a.portManager.AddMapping(cluster, namespace, resourceType, resourceName, remotePort, localPort)
+}
+
+// RemovePortMapping 删除端口映射
+func (a *App) RemovePortMapping(id string) error {
+	return a.portManager.RemoveMapping(id)
+}
+
+// ListPortMappings 列出所有端口映射
+func (a *App) ListPortMappings() []*PortMapping {
+	return a.portManager.ListMappings()
+}
+
+// StartPortMapping 启动端口映射
+func (a *App) StartPortMapping(id string) error {
+	return a.portManager.StartMapping(id)
+}
+
+// StopPortMapping 停止端口映射
+func (a *App) StopPortMapping(id string) error {
+	return a.portManager.StopMapping(id)
 }
