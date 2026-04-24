@@ -1,0 +1,25 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "kite-proxy",
+  "outputfilename": "kite-proxy",
+  "frontend:install": "cd ui && npm install",
+  "frontend:build": "cd ui && npm run build",
+  "frontend:dev": "cd ui && npm run dev",
+  "frontend:dev:watcher": "cd ui && npm run dev",
+  "frontend:dev:serverUrl": "auto",
+  "frontend:dir": "ui",
+  "author": {
+    "name": "kite-proxy",
+    "email": "your@email.com"
+  },
+  "info": {
+    "companyName": "kite-proxy",
+    "productName": "Kite Proxy",
+    "productVersion": "1.0.0",
+    "copyright": "Copyright © 2026",
+    "comments": "Kubernetes API Forwarding Proxy Desktop App"
+  },
+  "wailsjsdir": "./ui/src",
+  "version": "2",
+  "debounceMS": 750
+}
