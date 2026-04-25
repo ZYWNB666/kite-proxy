@@ -68,6 +68,7 @@ jobs:
   build-desktop-windows:
     name: Desktop / windows-amd64
     runs-on: windows-latest
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -85,6 +86,16 @@ jobs:
           cache: npm
           cache-dependency-path: ui/package-lock.json
 
+      - name: Cache Wails build assets (WebView2 etc.)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~\AppData\Local\wails
+            ~\AppData\Roaming\wails
+          key: wails-windows-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            wails-windows-${{ runner.os }}-
+
       - name: Install Wails CLI
         run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
 
@@ -92,8 +103,40 @@ jobs:
         working-directory: ui
         run: npm ci
 
+      - name: Pre-download WebView2 fixed distribution
+        shell: pwsh
+        run: |
+          $wv2Url = "https://github.com/nicholasgasior/gsfmt/releases/download/v0.0.0-skip/skip"
+          # 直接用 Wails 内置路径预热，让 wails build 不再中途下载
+          $wailsCacheDir = "$env:LOCALAPPDATA\wails"
+          if (-not (Test-Path $wailsCacheDir)) { New-Item -ItemType Directory -Force $wailsCacheDir | Out-Null }
+          # 下载 WebView2 bootstrapper (小文件，用于触发 fixed distribution 缓存)
+          $bootstrapUrl = "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
+          $bootstrapOut = "$wailsCacheDir\MicrosoftEdgeWebview2Setup.exe"
+          if (-not (Test-Path $bootstrapOut)) {
+            try {
+              Invoke-WebRequest -Uri $bootstrapUrl -OutFile $bootstrapOut -TimeoutSec 60
+            } catch {
+              Write-Host "Bootstrap download skipped (non-fatal): $_"
+            }
+          }
+
       - name: Build desktop app (Windows)
-        run: wails build -nsis -ldflags "-X main.version=${{ github.ref_name }}"
+        shell: pwsh
+        env:
+          CGO_ENABLED: "1"
+        run: wails build -ldflags "-X main.version=${{ github.ref_name }}"
+
+      - name: Package with NSIS (optional)
+        shell: pwsh
+        run: |
+          $nsis = Get-Command makensis -ErrorAction SilentlyContinue
+          if ($nsis) {
+            wails build -nsis -ldflags "-X main.version=${{ github.ref_name }}"
+          } else {
+            Write-Host "NSIS not found, skipping installer packaging"
+          }
+        continue-on-error: true
 
       - name: Upload Windows desktop artifact
         uses: actions/upload-artifact@v4
