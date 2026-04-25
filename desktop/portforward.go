@@ -1,6 +1,7 @@
 package desktop
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"math/rand"
@@ -11,6 +12,12 @@ import (
 	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/portforward"
 	"k8s.io/client-go/transport/spdy"
 	"k8s.io/klog/v2"
@@ -177,15 +184,19 @@ func (m *PortForwardManager) startForwardingLocked(mapping *PortMapping) error {
 		return fmt.Errorf("failed to get cluster config: %w", err)
 	}
 
-	// 构建资源 URL
-	// Service 需要使用 "http:{name}:{port}" 格式让 K8s API server 能路由到正确的 pod
+	// Build target port-forward path.
+	// Kubernetes only supports pod port-forward; for Service we resolve a backend pod first.
 	var resourcePath string
+	remotePortForPod := mapping.RemotePort
 	if mapping.ResourceType == "service" {
-		resourcePath = fmt.Sprintf("/api/v1/namespaces/%s/services/http:%s:%d/portforward",
-			mapping.Namespace, mapping.ResourceName, mapping.RemotePort)
+		podName, podPort, err := m.resolveServiceToPod(restConfig, mapping.Namespace, mapping.ResourceName, mapping.RemotePort)
+		if err != nil {
+			return err
+		}
+		remotePortForPod = podPort
+		resourcePath = fmt.Sprintf("/api/v1/namespaces/%s/pods/%s/portforward", mapping.Namespace, podName)
 	} else if mapping.ResourceType == "pod" {
-		resourcePath = fmt.Sprintf("/api/v1/namespaces/%s/pods/%s/portforward",
-			mapping.Namespace, mapping.ResourceName)
+		resourcePath = fmt.Sprintf("/api/v1/namespaces/%s/pods/%s/portforward", mapping.Namespace, mapping.ResourceName)
 	} else {
 		return fmt.Errorf("unsupported resource type: %s", mapping.ResourceType)
 	}
@@ -207,7 +218,7 @@ func (m *PortForwardManager) startForwardingLocked(mapping *PortMapping) error {
 	stopChan := make(chan struct{}, 1)
 	readyChan := make(chan struct{}, 1)
 
-	ports := []string{fmt.Sprintf("%d:%d", mapping.LocalPort, mapping.RemotePort)}
+	ports := []string{fmt.Sprintf("%d:%d", mapping.LocalPort, remotePortForPod)}
 
 	out, errOut := io.Discard, io.Discard
 	if klog.V(2).Enabled() {
@@ -320,4 +331,90 @@ type klogWriter struct{}
 func (w *klogWriter) Write(p []byte) (n int, err error) {
 	klog.V(2).Info(string(p))
 	return len(p), nil
+}
+
+func (m *PortForwardManager) resolveServiceToPod(restConfig *rest.Config, namespace, serviceName string, requestedPort int) (string, int, error) {
+	clientset, err := kubernetes.NewForConfig(restConfig)
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to create kubernetes client: %w", err)
+	}
+
+	ctx := context.Background()
+	svc, err := clientset.CoreV1().Services(namespace).Get(ctx, serviceName, metav1.GetOptions{})
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to get service %s/%s: %w", namespace, serviceName, err)
+	}
+
+	if len(svc.Spec.Selector) == 0 {
+		return "", 0, fmt.Errorf("service %s/%s has no selector, cannot resolve backend pod for port-forward", namespace, serviceName)
+	}
+
+	podList, err := clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labels.Set(svc.Spec.Selector).String(),
+	})
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to list pods for service %s/%s: %w", namespace, serviceName, err)
+	}
+	if len(podList.Items) == 0 {
+		return "", 0, fmt.Errorf("no pods found for service %s/%s selector", namespace, serviceName)
+	}
+
+	pod := pickPortForwardPod(podList.Items)
+	targetPort, err := resolveServiceTargetPort(svc, pod, requestedPort)
+	if err != nil {
+		return "", 0, err
+	}
+
+	klog.Infof("Resolved service %s/%s:%d to pod %s:%d for port-forward", namespace, serviceName, requestedPort, pod.Name, targetPort)
+	return pod.Name, targetPort, nil
+}
+
+func pickPortForwardPod(pods []corev1.Pod) *corev1.Pod {
+	for i := range pods {
+		pod := &pods[i]
+		if pod.DeletionTimestamp == nil && pod.Status.Phase == corev1.PodRunning {
+			return pod
+		}
+	}
+	return &pods[0]
+}
+
+func resolveServiceTargetPort(svc *corev1.Service, pod *corev1.Pod, requestedPort int) (int, error) {
+	for _, port := range svc.Spec.Ports {
+		if int(port.Port) != requestedPort {
+			continue
+		}
+
+		switch port.TargetPort.Type {
+		case intstr.Int:
+			if port.TargetPort.IntVal > 0 {
+				return int(port.TargetPort.IntVal), nil
+			}
+			return int(port.Port), nil
+		case intstr.String:
+			name := port.TargetPort.StrVal
+			if name == "" {
+				return int(port.Port), nil
+			}
+			if p, ok := findContainerPortByName(pod, name); ok {
+				return p, nil
+			}
+			return 0, fmt.Errorf("service targetPort %q was not found on pod %s", name, pod.Name)
+		default:
+			return int(port.Port), nil
+		}
+	}
+
+	return 0, fmt.Errorf("service port %d was not found on service %s/%s", requestedPort, svc.Namespace, svc.Name)
+}
+
+func findContainerPortByName(pod *corev1.Pod, targetName string) (int, bool) {
+	for _, c := range pod.Spec.Containers {
+		for _, p := range c.Ports {
+			if p.Name == targetName {
+				return int(p.ContainerPort), true
+			}
+		}
+	}
+	return 0, false
 }
