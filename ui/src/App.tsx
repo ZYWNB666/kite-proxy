@@ -1,9 +1,8 @@
 import { useState, useEffect } from 'react'
 import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom'
 import { Toaster, toast } from 'sonner'
-import { Settings, Server, BookOpen } from 'lucide-react'
+import { Settings, BookOpen } from 'lucide-react'
 import ConfigPage from './pages/ConfigPage'
-import ClustersPage from './pages/ClustersPage'
 import UsagePage from './pages/UsagePage'
 import { getConfig } from './api/adapter'
 import type { Config } from './types'
@@ -26,12 +25,6 @@ function Nav({ configured }: { configured: boolean }) {
       <NavLink to="/ui/config" className={linkClass}>
         <Settings size={16} />
         {t.configuration}
-      </NavLink>
-      <NavLink to="/ui/clusters" className={({ isActive }) =>
-        linkClass({ isActive }) + (!configured ? ' opacity-40 pointer-events-none' : '')
-      }>
-        <Server size={16} />
-        {t.clusters}
       </NavLink>
       <NavLink to="/ui/usage" className={({ isActive }) =>
         linkClass({ isActive }) + (!configured ? ' opacity-40 pointer-events-none' : '')
@@ -130,7 +123,6 @@ function AppInner() {
               <Route path="/ui" element={<ConfigPage config={config} onSaved={() => { void loadConfig() }} />} />
               <Route path="/ui/" element={<ConfigPage config={config} onSaved={() => { void loadConfig() }} />} />
               <Route path="/ui/config" element={<ConfigPage config={config} onSaved={() => { void loadConfig() }} />} />
-              <Route path="/ui/clusters" element={<ClustersPage />} />
               <Route path="/ui/usage" element={<UsagePage />} />
             </Routes>
           </main>

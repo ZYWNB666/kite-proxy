@@ -58,6 +58,22 @@ func NewPortForwardManager(app *App) *PortForwardManager {
 
 // AddMapping 添加端口映射
 func (m *PortForwardManager) AddMapping(cluster, namespace, resourceType, resourceName string, remotePort, localPort int) (*PortMapping, error) {
+	// 预加载集群 kubeconfig（在持有锁之前，避免阻塞其他操作）
+	if err := m.app.PrewarmCluster(cluster); err != nil {
+		klog.Warningf("Failed to prewarm cluster %s: %v", cluster, err)
+		// 不返回错误，继续尝试添加映射（getOrFetchRestConfig 会重试）
+	}
+
+	return m.addMappingInternal(cluster, namespace, resourceType, resourceName, remotePort, localPort, true)
+}
+
+// addMappingWithoutAutoStart 添加端口映射但不自动启动（用于恢复持久化的映射）
+func (m *PortForwardManager) addMappingWithoutAutoStart(cluster, namespace, resourceType, resourceName string, remotePort, localPort int) (*PortMapping, error) {
+	return m.addMappingInternal(cluster, namespace, resourceType, resourceName, remotePort, localPort, false)
+}
+
+// addMappingInternal 内部方法：添加端口映射
+func (m *PortForwardManager) addMappingInternal(cluster, namespace, resourceType, resourceName string, remotePort, localPort int, autoStart bool) (*PortMapping, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -98,11 +114,13 @@ func (m *PortForwardManager) AddMapping(cluster, namespace, resourceType, resour
 
 	m.mappings[id] = mapping
 
-	// 自动启动端口转发
-	if err := m.startForwardingLocked(mapping); err != nil {
-		mapping.Status = "error"
-		mapping.Error = err.Error()
-		klog.Errorf("Failed to start port forwarding: %v", err)
+	// 如果需要，自动启动端口转发
+	if autoStart {
+		if err := m.startForwardingLocked(mapping); err != nil {
+			mapping.Status = "error"
+			mapping.Error = err.Error()
+			klog.Errorf("Failed to start port forwarding: %v", err)
+		}
 	}
 
 	return mapping, nil

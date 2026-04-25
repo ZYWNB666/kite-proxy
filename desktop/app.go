@@ -22,10 +22,23 @@ type Config struct {
 
 // PersistedConfig is the on-disk representation of the config
 type PersistedConfig struct {
-	KiteURL  string `json:"kiteURL"`
-	APIKey   string `json:"apiKey"`
-	Language string `json:"language"` // "en" | "zh"
-	Theme    string `json:"theme"`    // "light" | "dark"
+	KiteURL      string                 `json:"kiteURL"`
+	APIKey       string                 `json:"apiKey"`
+	Language     string                 `json:"language"`     // "en" | "zh"
+	Theme        string                 `json:"theme"`        // "light" | "dark"
+	PortMappings []PersistedPortMapping `json:"portMappings"` // 持久化的端口映射
+}
+
+// PersistedPortMapping 是端口映射的持久化表示（不包含运行时状态）
+type PersistedPortMapping struct {
+	ID           string `json:"id"`
+	Cluster      string `json:"cluster"`
+	Namespace    string `json:"namespace"`
+	ResourceType string `json:"resourceType"`
+	ResourceName string `json:"resourceName"`
+	RemotePort   int    `json:"remotePort"`
+	LocalPort    int    `json:"localPort"`
+	AutoStart    bool   `json:"autoStart"` // 是否在启动时自动开始转发
 }
 
 // configFilePath returns the path to the persisted config file
@@ -45,17 +58,17 @@ type ClusterInfo struct {
 
 // App 是桌面应用的结构体
 type App struct {
-	ctx            context.Context
-	config         *Config
-	cache          *KubeconfigCache
-	client         *api.Client
-	portManager    *PortForwardManager
-	trayIcon       []byte
-	uiLanguage     string
-	uiTheme        string
-	authMu         sync.Mutex
-	lastAuthCheck  time.Time
-	stopAuthLoop   chan struct{}
+	ctx           context.Context
+	config        *Config
+	cache         *KubeconfigCache
+	client        *api.Client
+	portManager   *PortForwardManager
+	trayIcon      []byte
+	uiLanguage    string
+	uiTheme       string
+	authMu        sync.Mutex
+	lastAuthCheck time.Time
+	stopAuthLoop  chan struct{}
 }
 
 // NewApp 创建一个新的 App 应用实例
@@ -77,6 +90,8 @@ func (a *App) Startup(ctx context.Context) {
 	a.loadConfigFromDisk()
 	// 启动 API key 定期校验
 	go a.startAuthLoop()
+	// 恢复持久化的端口映射
+	a.restorePortMappings()
 	// 启动系统托盘
 	a.startTray()
 }
@@ -114,6 +129,10 @@ func (a *App) loadConfigFromDisk() {
 		a.client = api.NewClient(cfg.KiteURL, cfg.APIKey)
 		klog.Infof("Loaded config from disk: kiteURL=%s", cfg.KiteURL)
 	}
+	// 加载端口映射（在 Startup 中恢复）
+	if len(cfg.PortMappings) > 0 {
+		klog.Infof("Loaded %d persisted port mappings", len(cfg.PortMappings))
+	}
 }
 
 // saveConfigToDisk 将配置持久化到用户家目录
@@ -134,7 +153,25 @@ func (a *App) saveConfigToDisk() {
 		cfg.KiteURL = a.config.KiteURL
 		cfg.APIKey = a.config.APIKey
 	}
-	data, err := json.Marshal(cfg)
+	// 保存端口映射
+	if a.portManager != nil {
+		mappings := a.portManager.ListMappings()
+		persistedMappings := make([]PersistedPortMapping, 0, len(mappings))
+		for _, m := range mappings {
+			persistedMappings = append(persistedMappings, PersistedPortMapping{
+				ID:           m.ID,
+				Cluster:      m.Cluster,
+				Namespace:    m.Namespace,
+				ResourceType: m.ResourceType,
+				ResourceName: m.ResourceName,
+				RemotePort:   m.RemotePort,
+				LocalPort:    m.LocalPort,
+				AutoStart:    m.Status == "running", // 保存当前状态
+			})
+		}
+		cfg.PortMappings = persistedMappings
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		klog.Errorf("Failed to marshal config: %v", err)
 		return
@@ -161,6 +198,49 @@ func (a *App) Shutdown(ctx context.Context) {
 	}
 	// 清除敏感数据
 	a.cache.Clear()
+}
+
+// restorePortMappings 恢复持久化的端口映射
+func (a *App) restorePortMappings() {
+	path := configFilePath()
+	if path == "" {
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var cfg PersistedConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return
+	}
+	if len(cfg.PortMappings) == 0 {
+		return
+	}
+	if a.config == nil || a.client == nil {
+		klog.Info("Skipping port mapping restoration: not configured yet")
+		return
+	}
+
+	klog.Infof("Restoring %d port mappings...", len(cfg.PortMappings))
+	for _, pm := range cfg.PortMappings {
+		// 添加映射（但不自动启动，保持停止状态）
+		mapping, err := a.portManager.addMappingWithoutAutoStart(
+			pm.Cluster, pm.Namespace, pm.ResourceType, pm.ResourceName,
+			pm.RemotePort, pm.LocalPort,
+		)
+		if err != nil {
+			klog.Errorf("Failed to restore mapping %s: %v", pm.ID, err)
+			continue
+		}
+		// 如果之前是运行状态，尝试启动
+		if pm.AutoStart {
+			if err := a.portManager.StartMapping(mapping.ID); err != nil {
+				klog.Warningf("Failed to auto-start mapping %s: %v", mapping.ID, err)
+			}
+		}
+	}
+	klog.Info("Port mappings restored")
 }
 
 // GetConfig 获取当前配置
@@ -405,12 +485,28 @@ func (a *App) AddPortMapping(cluster, namespace, resourceType, resourceName stri
 		return nil, fmt.Errorf("not configured")
 	}
 
-	return a.portManager.AddMapping(cluster, namespace, resourceType, resourceName, remotePort, localPort)
+	mapping, err := a.portManager.AddMapping(cluster, namespace, resourceType, resourceName, remotePort, localPort)
+	if err != nil {
+		return nil, err
+	}
+
+	// 持久化映射到磁盘
+	a.saveConfigToDisk()
+
+	return mapping, nil
 }
 
 // RemovePortMapping 删除端口映射
 func (a *App) RemovePortMapping(id string) error {
-	return a.portManager.RemoveMapping(id)
+	err := a.portManager.RemoveMapping(id)
+	if err != nil {
+		return err
+	}
+
+	// 持久化到磁盘
+	a.saveConfigToDisk()
+
+	return nil
 }
 
 // ListPortMappings 列出所有端口映射

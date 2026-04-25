@@ -291,6 +291,37 @@ export default function UsagePage() {
         </button>
       </div>
 
+      {/* 显示可转发的集群 */}
+      {clusters.length > 0 && (
+        <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-4 mb-6">
+          <div className="flex items-start gap-3">
+            <div className="flex-shrink-0 mt-0.5">
+              <div className="text-blue-600 dark:text-blue-400">
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01" />
+                </svg>
+              </div>
+            </div>
+            <div className="flex-1">
+              <h3 className="text-sm font-semibold text-blue-900 dark:text-blue-200 mb-1">
+                {t.availableClusters || '可转发集群'}
+              </h3>
+              <div className="flex flex-wrap gap-2">
+                {clusters.map(c => (
+                  <span 
+                    key={c.name}
+                    className="inline-flex items-center px-2.5 py-0.5 rounded text-xs font-medium
+                      bg-blue-100 dark:bg-blue-900/40 text-blue-800 dark:text-blue-300 border border-blue-200 dark:border-blue-700"
+                  >
+                    {c.name}
+                  </span>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* 添加端口映射表单 */}
       <div className="bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-lg p-6 mb-6">
         <h2 className="text-lg font-semibold mb-4 flex items-center gap-2 dark:text-white">
