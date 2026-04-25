@@ -72,8 +72,9 @@ export default function ConfigPage({ config, onSaved }: Props) {
   }
 
   return (
-    <div className="max-w-xl mx-auto">
-      <h1 className="text-2xl font-bold mb-2 dark:text-white">{t.configTitle}</h1>
+    <div className="flex-1 overflow-y-auto p-4 lg:p-8">
+      <div className="max-w-xl mx-auto">
+        <h1 className="text-2xl font-bold mb-2 dark:text-white">{t.configTitle}</h1>
       <p className="text-gray-500 dark:text-gray-400 mb-6 text-sm">{t.configDescription}</p>
 
       {config?.configured && (
@@ -184,6 +185,7 @@ export default function ConfigPage({ config, onSaved }: Props) {
           </div>
         </div>
       </div>
+    </div>
     </div>
   )
 }

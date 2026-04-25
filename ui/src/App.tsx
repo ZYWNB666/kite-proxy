@@ -94,9 +94,9 @@ function AppInner() {
   return (
     <BrowserRouter>
       <Toaster richColors position="top-right" />
-      <div className="min-h-screen bg-gray-50 dark:bg-gray-950 flex flex-col">
+      <div className="h-screen w-screen overflow-hidden bg-gray-50 dark:bg-gray-950 flex flex-col">
         {/* Header */}
-        <header className="bg-white dark:bg-gray-900 border-b dark:border-gray-700 px-6 py-4 flex items-center justify-between shadow-sm">
+        <header className="bg-white dark:bg-gray-900 border-b dark:border-gray-700 px-6 py-3 flex items-center justify-between shadow-sm flex-shrink-0">
           <div className="flex items-center gap-3">
             <div className="font-bold text-lg text-blue-700 dark:text-blue-400 tracking-tight">kite-proxy</div>
           </div>
@@ -117,7 +117,7 @@ function AppInner() {
           </aside>
 
           {/* Main content */}
-          <main className="flex-1 overflow-auto p-8 dark:text-white">
+          <main className="flex-1 flex flex-col min-w-0 overflow-hidden dark:text-white">
             <Routes>
               <Route path="/" element={<ConfigPage config={config} onSaved={() => { void loadConfig() }} />} />
               <Route path="/ui" element={<ConfigPage config={config} onSaved={() => { void loadConfig() }} />} />

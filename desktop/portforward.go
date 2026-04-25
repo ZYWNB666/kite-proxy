@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"sync"
 	"time"
 
@@ -155,6 +156,10 @@ func (m *PortForwardManager) ListMappings() []*PortMapping {
 	for _, mapping := range m.mappings {
 		mappings = append(mappings, mapping)
 	}
+
+	sort.Slice(mappings, func(i, j int) bool {
+		return mappings[i].CreatedAt < mappings[j].CreatedAt
+	})
 
 	return mappings
 }

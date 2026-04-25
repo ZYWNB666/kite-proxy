@@ -3,7 +3,7 @@
 package desktop
 
 import (
-	"github.com/getlantern/systray"
+	"github.com/energye/systray"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 	"k8s.io/klog/v2"
 )
@@ -25,24 +25,34 @@ func (a *App) onTrayReady() {
 	systray.AddSeparator()
 	mQuit := systray.AddMenuItem("退出", "完全退出 Kite Proxy")
 
-	for {
-		select {
-		case <-mShow.ClickedCh:
-			if a.ctx != nil {
-				runtime.WindowShow(a.ctx)
+	go func() {
+		for {
+			select {
+			case <-mShow.ClickedCh:
+				go func() {
+					if a.ctx != nil {
+						runtime.WindowShow(a.ctx)
+						// 唤醒前端组件自动刷新数据
+						runtime.EventsEmit(a.ctx, "app:wakeup")
+					}
+				}()
+			case <-mHide.ClickedCh:
+				go func() {
+					if a.ctx != nil {
+						runtime.WindowHide(a.ctx)
+					}
+				}()
+			case <-mQuit.ClickedCh:
+				go func() {
+					systray.Quit()
+					if a.ctx != nil {
+						runtime.Quit(a.ctx)
+					}
+				}()
+				return
 			}
-		case <-mHide.ClickedCh:
-			if a.ctx != nil {
-				runtime.WindowHide(a.ctx)
-			}
-		case <-mQuit.ClickedCh:
-			systray.Quit()
-			if a.ctx != nil {
-				runtime.Quit(a.ctx)
-			}
-			return
 		}
-	}
+	}()
 }
 
 // onTrayExit 托盘退出回调

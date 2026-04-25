@@ -68,11 +68,26 @@ export default function UsagePage() {
   // 检测是否在桌面环境
   const isDesktop = typeof window !== 'undefined' && 'go' in window
 
-  // 加载集群列表
+  // 加载集群列表与定期轮询状态
   useEffect(() => {
     if (!isDesktop) return
     void loadClusters()
-    void loadMappings()
+    void loadMappings(false)
+
+    // 每 3 秒后台静默轮询一次映射状态
+    const intervalId = setInterval(() => {
+      void loadMappings(true)
+    }, 3000)
+
+    // @ts-ignore
+    const unlisten = window.runtime?.EventsOn?.('app:wakeup', () => {
+      void loadMappings(false)
+    })
+
+    return () => {
+      clearInterval(intervalId)
+      if (typeof unlisten === 'function') unlisten()
+    }
   }, [])
 
   // 当选择集群后，加载 namespace 列表
@@ -146,17 +161,17 @@ export default function UsagePage() {
     }
   }
 
-  async function loadMappings() {
+  async function loadMappings(silent = false) {
     if (!isDesktop) return
-    setLoadingMappings(true)
+    if (!silent) setLoadingMappings(true)
     try {
       // @ts-ignore
       const result = await window.go.desktop.App.ListPortMappings()
       setMappings(result || [])
     } catch (err) {
-      toast.error(`${t.failedToLoad}: ${String(err)}`)
+      if (!silent) toast.error(`${t.failedToLoad}: ${String(err)}`)
     } finally {
-      setLoadingMappings(false)
+      if (!silent) setLoadingMappings(false)
     }
   }
 
@@ -261,7 +276,7 @@ export default function UsagePage() {
   }
 
   return (
-    <div className="p-6">
+    <div className="flex flex-col h-full overflow-hidden">
       <ConfirmDialog
         open={confirmRemoveId !== null}
         message={t.confirmRemove}
@@ -273,40 +288,43 @@ export default function UsagePage() {
         onCancel={() => setConfirmRemoveId(null)}
       />
 
-      <div className="mb-6 flex items-center justify-between">
+      {/* 固定在顶部的标题区域 */}
+      <div className="flex-shrink-0 px-4 pt-4 pb-2 flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold dark:text-white">{t.portForwarding}</h1>
-          <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+          <h1 className="text-xl font-bold dark:text-white">{t.portForwarding}</h1>
+          <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
             {t.portForwardingDescription}
           </p>
         </div>
         <button
           onClick={() => void loadMappings()}
           disabled={loadingMappings}
-          className="flex items-center gap-2 px-3 py-2 text-sm border dark:border-gray-600
+          className="flex items-center gap-2 px-3 py-1.5 text-xs border dark:border-gray-600
             dark:text-gray-300 rounded-md hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-50"
         >
-          <RefreshCw size={16} className={loadingMappings ? 'animate-spin' : ''} />
+          <RefreshCw size={14} className={loadingMappings ? 'animate-spin' : ''} />
           {t.refresh}
         </button>
       </div>
 
-      {/* 显示可转发的集群 */}
-      {clusters.length > 0 && (
-        <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-4 mb-6">
-          <div className="flex items-start gap-3">
+      {/* 内容区域 (分为不可滚动表单 + 可滚动列表) */}
+      <div className="flex-1 flex flex-col px-4 pb-4 overflow-hidden gap-3">
+        {/* 显示可转发的集群 */}
+        {clusters.length > 0 && (
+          <div className="flex-shrink-0 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-3">
+          <div className="flex items-start gap-2">
             <div className="flex-shrink-0 mt-0.5">
               <div className="text-blue-600 dark:text-blue-400">
-                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01" />
                 </svg>
               </div>
             </div>
             <div className="flex-1">
-              <h3 className="text-sm font-semibold text-blue-900 dark:text-blue-200 mb-1">
+              <h3 className="text-xs font-semibold text-blue-900 dark:text-blue-200 mb-1">
                 {t.availableClusters || '可转发集群'}
               </h3>
-              <div className="flex flex-wrap gap-2">
+              <div className="flex flex-wrap gap-1.5">
                 {clusters.map(c => (
                   <span 
                     key={c.name}
@@ -319,25 +337,25 @@ export default function UsagePage() {
               </div>
             </div>
           </div>
-        </div>
-      )}
+          </div>
+        )}
 
-      {/* 添加端口映射表单 */}
-      <div className="bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-lg p-6 mb-6">
-        <h2 className="text-lg font-semibold mb-4 flex items-center gap-2 dark:text-white">
-          <Plus size={18} />
+        {/* 添加端口映射表单 */}
+        <div className="flex-shrink-0 bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-lg p-4">
+        <h2 className="text-base font-semibold mb-3 flex items-center gap-2 dark:text-white">
+          <Plus size={16} />
           {t.addMapping}
         </h2>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
           {/* 集群选择 */}
           <div>
-            <label className="block text-sm font-medium mb-1 dark:text-gray-200">{t.cluster} *</label>
+            <label className="block text-xs font-medium mb-1 dark:text-gray-200">{t.cluster} *</label>
             <select
               value={selectedCluster}
               onChange={(e) => setSelectedCluster(e.target.value)}
               disabled={loadingClusters}
-              className="w-full px-3 py-2 border dark:border-gray-600 rounded-md bg-white dark:bg-gray-700
+              className="w-full px-2 py-1.5 text-sm border dark:border-gray-600 rounded-md bg-white dark:bg-gray-700
                 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
             >
               <option value="">{t.selectCluster}</option>
@@ -349,12 +367,12 @@ export default function UsagePage() {
 
           {/* Namespace 选择 */}
           <div>
-            <label className="block text-sm font-medium mb-1 dark:text-gray-200">{t.namespace} *</label>
+            <label className="block text-xs font-medium mb-1 dark:text-gray-200">{t.namespace} *</label>
             <select
               value={selectedNamespace}
               onChange={(e) => setSelectedNamespace(e.target.value)}
               disabled={!selectedCluster || loadingNamespaces}
-              className="w-full px-3 py-2 border dark:border-gray-600 rounded-md bg-white dark:bg-gray-700
+              className="w-full px-2 py-1.5 text-sm border dark:border-gray-600 rounded-md bg-white dark:bg-gray-700
                 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
             >
               <option value="">{t.selectNamespace}</option>
@@ -366,12 +384,12 @@ export default function UsagePage() {
 
           {/* 资源类型 */}
           <div>
-            <label className="block text-sm font-medium mb-1 dark:text-gray-200">{t.resourceType} *</label>
+            <label className="block text-xs font-medium mb-1 dark:text-gray-200">{t.resourceType} *</label>
             <select
               value={resourceType}
               onChange={(e) => setResourceType(e.target.value as 'service' | 'pod')}
               disabled={!selectedNamespace}
-              className="w-full px-3 py-2 border dark:border-gray-600 rounded-md bg-white dark:bg-gray-700
+              className="w-full px-2 py-1.5 text-sm border dark:border-gray-600 rounded-md bg-white dark:bg-gray-700
                 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
             >
               <option value="service">Service</option>
@@ -381,7 +399,7 @@ export default function UsagePage() {
 
           {/* 资源选择 */}
           <div>
-            <label className="block text-sm font-medium mb-1 dark:text-gray-200">
+            <label className="block text-xs font-medium mb-1 dark:text-gray-200">
               {resourceType === 'service' ? 'Service' : 'Pod'} *
             </label>
             <select
@@ -391,7 +409,7 @@ export default function UsagePage() {
                 setSelectedRemotePort('')
               }}
               disabled={!selectedNamespace || loadingResources}
-              className="w-full px-3 py-2 border dark:border-gray-600 rounded-md bg-white dark:bg-gray-700
+              className="w-full px-2 py-1.5 text-sm border dark:border-gray-600 rounded-md bg-white dark:bg-gray-700
                 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
             >
               <option value="">{t.selectResource}</option>
@@ -406,12 +424,12 @@ export default function UsagePage() {
 
           {/* 远程端口 */}
           <div>
-            <label className="block text-sm font-medium mb-1 dark:text-gray-200">{t.remotePort} *</label>
+            <label className="block text-xs font-medium mb-1 dark:text-gray-200">{t.remotePort} *</label>
             <select
               value={selectedRemotePort}
               onChange={(e) => setSelectedRemotePort(Number(e.target.value))}
               disabled={!selectedResource}
-              className="w-full px-3 py-2 border dark:border-gray-600 rounded-md bg-white dark:bg-gray-700
+              className="w-full px-2 py-1.5 text-sm border dark:border-gray-600 rounded-md bg-white dark:bg-gray-700
                 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
             >
               <option value="">{t.selectPort}</option>
@@ -425,7 +443,7 @@ export default function UsagePage() {
 
           {/* 本地端口 */}
           <div>
-            <label className="block text-sm font-medium mb-1 dark:text-gray-200">{t.localPort}</label>
+            <label className="block text-xs font-medium mb-1 dark:text-gray-200">{t.localPort}</label>
             <input
               type="number"
               value={localPort}
@@ -433,60 +451,60 @@ export default function UsagePage() {
               placeholder={t.randomPort}
               min="1024"
               max="65535"
-              className="w-full px-3 py-2 border dark:border-gray-600 rounded-md bg-white dark:bg-gray-700
+              className="w-full px-2 py-1.5 text-sm border dark:border-gray-600 rounded-md bg-white dark:bg-gray-700
                 text-gray-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
           </div>
         </div>
 
-        <div className="mt-4">
+        <div className="mt-3">
           <button
             onClick={() => void handleAddMapping()}
             disabled={!selectedCluster || !selectedNamespace || !selectedResource || !selectedRemotePort || addingMapping}
-            className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-md
+            className="flex items-center gap-1 px-3 py-1.5 text-sm bg-blue-600 text-white rounded-md
               hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {addingMapping ? (
-              <Loader2 size={16} className="animate-spin" />
+              <Loader2 size={14} className="animate-spin" />
             ) : (
-              <Plus size={16} />
+              <Plus size={14} />
             )}
             {addingMapping ? t.connecting : t.addMapping}
           </button>
         </div>
-      </div>
+        </div>
 
-      {/* 端口映射列表 */}
-      <div className="bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-lg overflow-hidden">
-        <div className="px-6 py-4 border-b dark:border-gray-700 bg-gray-50 dark:bg-gray-900/50">
-          <h2 className="text-lg font-semibold dark:text-white">{t.activeMappings}</h2>
+        {/* 端口映射列表 */}
+        <div className="flex flex-col flex-1 bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-lg overflow-hidden min-h-0">
+        <div className="px-4 py-3 border-b dark:border-gray-700 bg-gray-50 dark:bg-gray-900/50 flex-shrink-0">
+          <h2 className="text-sm font-semibold dark:text-white">{t.activeMappings}</h2>
         </div>
 
         {mappings.length === 0 ? (
-          <div className="p-8 text-center text-gray-500 dark:text-gray-400">
+          <div className="p-8 text-center text-sm text-gray-500 dark:text-gray-400">
             {t.noMappings}
           </div>
         ) : (
-          <div className="overflow-x-auto">
+          <div className="flex-1 overflow-x-auto overflow-y-auto">
             <table className="w-full">
-              <thead className="bg-gray-50 dark:bg-gray-900/50 border-b dark:border-gray-700">
+              <thead className="bg-gray-50 dark:bg-gray-900/50 border-b dark:border-gray-700 sticky top-0 z-10 shadow-sm">
                 <tr>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">{t.resource}</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">{t.localURL}</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">{t.remotePort}</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">{t.status}</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">{t.actions}</th>
+                  <th className="px-4 py-2 text-left text-[11px] font-medium text-gray-500 dark:text-gray-400 uppercase">{t.resource}</th>
+                  <th className="px-4 py-2 text-left text-[11px] font-medium text-gray-500 dark:text-gray-400 uppercase">{t.localURL}</th>
+                  <th className="px-4 py-2 text-left text-[11px] font-medium text-gray-500 dark:text-gray-400 uppercase">{t.remotePort}</th>
+                  <th className="px-4 py-2 text-left text-[11px] font-medium text-gray-500 dark:text-gray-400 uppercase">{t.status}</th>
+                  <th className="px-4 py-2 text-left text-[11px] font-medium text-gray-500 dark:text-gray-400 uppercase">{t.actions}</th>
                 </tr>
               </thead>
               <tbody className="divide-y dark:divide-gray-700">
                 {mappings.map(mapping => (
                   <tr key={mapping.id} className="hover:bg-gray-50 dark:hover:bg-gray-700/50">
-                    <td className="px-6 py-4">
+                    <td className="px-4 py-2.5">
                       <div className="text-sm font-medium dark:text-white">{mapping.resourceType}/{mapping.resourceName}</div>
                       <div className="text-xs text-gray-500 dark:text-gray-400">{mapping.cluster} / {mapping.namespace}</div>
                     </td>
-                    <td className="px-6 py-4">
-                      <div className="flex items-center gap-2">
+                    <td className="px-4 py-2.5">
+                      <div className="flex items-center gap-1.5">
                         <span className="font-mono text-sm dark:text-gray-200">http://localhost:{mapping.localPort}</span>
                         <button
                           onClick={() => void handleCopyURL(mapping)}
@@ -504,11 +522,11 @@ export default function UsagePage() {
                         </button>
                       </div>
                     </td>
-                    <td className="px-6 py-4">
+                    <td className="px-4 py-2.5">
                       <span className="font-mono text-sm dark:text-gray-200">{mapping.remotePort}</span>
                     </td>
-                    <td className="px-6 py-4">
-                      <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
+                    <td className="px-4 py-2.5">
+                      <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
                         mapping.status === 'running' ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400' :
                         mapping.status === 'stopped' ? 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300' :
                         'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400'
@@ -516,18 +534,18 @@ export default function UsagePage() {
                         {mapping.status}
                       </span>
                       {mapping.error && (
-                        <div className="text-xs text-red-600 dark:text-red-400 mt-1">{mapping.error}</div>
+                        <div className="text-[11px] text-red-600 dark:text-red-400 mt-0.5">{mapping.error}</div>
                       )}
                     </td>
-                    <td className="px-6 py-4">
-                      <div className="flex items-center gap-2">
+                    <td className="px-4 py-2.5">
+                      <div className="flex items-center gap-1">
                         {mapping.status === 'running' ? (
                           <button
                             onClick={() => void handleStopMapping(mapping.id)}
                             className="p-1.5 text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-700 rounded"
                             title={t.stop}
                           >
-                            <Square size={16} />
+                            <Square size={14} />
                           </button>
                         ) : (
                           <button
@@ -535,7 +553,7 @@ export default function UsagePage() {
                             className="p-1.5 text-green-600 dark:text-green-400 hover:text-green-900 dark:hover:text-green-300 hover:bg-green-50 dark:hover:bg-green-900/30 rounded"
                             title={t.start}
                           >
-                            <Play size={16} />
+                            <Play size={14} />
                           </button>
                         )}
                         <button
@@ -543,7 +561,7 @@ export default function UsagePage() {
                           className="p-1.5 text-red-600 dark:text-red-400 hover:text-red-900 dark:hover:text-red-300 hover:bg-red-50 dark:hover:bg-red-900/30 rounded"
                           title={t.remove}
                         >
-                          <Trash2 size={16} />
+                          <Trash2 size={14} />
                         </button>
                       </div>
                     </td>
@@ -553,6 +571,7 @@ export default function UsagePage() {
             </table>
           </div>
         )}
+        </div>
       </div>
     </div>
   )

@@ -22,10 +22,14 @@ jobs:
             os: windows-latest
             platform: windows/amd64
             package_name: kite-proxy-windows-amd64.zip
-          - name: macos-universal
+          - name: macos-amd64
             os: macos-latest
-            platform: darwin/universal
-            package_name: kite-proxy-macos-universal.tar.gz
+            platform: darwin/amd64
+            package_name: kite-proxy-macos-amd64.tar.gz
+          - name: macos-arm64
+            os: macos-latest
+            platform: darwin/arm64
+            package_name: kite-proxy-macos-arm64.tar.gz
 
     steps:
       - name: Checkout
