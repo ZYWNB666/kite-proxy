@@ -16,6 +16,19 @@ interface PortMapping {
   status: string
   error: string
   createdAt: string
+  totalBytesSent: number
+  totalBytesReceived: number
+  currentSpeedSent: number
+  currentSpeedRecv: number
+}
+
+// 格式化字节
+function formatBytes(bytes: number): string {
+  if (!bytes || bytes === 0) return '0 B'
+  const k = 1024
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB']
+  const i = Math.floor(Math.log(bytes) / Math.log(k))
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i]
 }
 
 // Namespace 信息
@@ -492,6 +505,7 @@ export default function UsagePage() {
                   <th className="px-4 py-2 text-left text-[11px] font-medium text-gray-500 dark:text-gray-400 uppercase">{t.resource}</th>
                   <th className="px-4 py-2 text-left text-[11px] font-medium text-gray-500 dark:text-gray-400 uppercase">{t.localURL}</th>
                   <th className="px-4 py-2 text-left text-[11px] font-medium text-gray-500 dark:text-gray-400 uppercase">{t.remotePort}</th>
+                  <th className="px-4 py-2 text-left text-[11px] font-medium text-gray-500 dark:text-gray-400 uppercase">网络 / 流量</th>
                   <th className="px-4 py-2 text-left text-[11px] font-medium text-gray-500 dark:text-gray-400 uppercase">{t.status}</th>
                   <th className="px-4 py-2 text-left text-[11px] font-medium text-gray-500 dark:text-gray-400 uppercase">{t.actions}</th>
                 </tr>
@@ -524,6 +538,17 @@ export default function UsagePage() {
                     </td>
                     <td className="px-4 py-2.5">
                       <span className="font-mono text-sm dark:text-gray-200">{mapping.remotePort}</span>
+                    </td>
+                    <td className="px-4 py-2.5">
+                      <div className="flex flex-col gap-0.5">
+                        <div className="flex items-center gap-2 text-[11px] font-mono">
+                          <span className="text-blue-600 dark:text-blue-400" title="发送网速">↑ {formatBytes(mapping.currentSpeedSent)}/s</span>
+                          <span className="text-green-600 dark:text-green-400" title="接收网速">↓ {formatBytes(mapping.currentSpeedRecv)}/s</span>
+                        </div>
+                        <div className="text-[10px] text-gray-400 dark:text-gray-500 font-mono">
+                          总计: ↑ {formatBytes(mapping.totalBytesSent)} / ↓ {formatBytes(mapping.totalBytesReceived)}
+                        </div>
+                      </div>
                     </td>
                     <td className="px-4 py-2.5">
                       <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${

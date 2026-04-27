@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
@@ -33,27 +34,63 @@ type PortMapping struct {
 	ResourceName string `json:"resourceName"` // 资源名称
 	RemotePort   int    `json:"remotePort"`   // 远程端口
 	LocalPort    int    `json:"localPort"`    // 本地端口
-	Status       string `json:"status"`       // 状态：running, stopped, error
-	Error        string `json:"error"`        // 错误信息
-	CreatedAt    string `json:"createdAt"`    // 创建时间
+	Status             string `json:"status"`       // 状态：running, stopped, error
+	Error              string `json:"error"`        // 错误信息
+	CreatedAt          string `json:"createdAt"`    // 创建时间
+	TotalBytesSent     uint64 `json:"totalBytesSent"`
+	TotalBytesReceived uint64 `json:"totalBytesReceived"`
+	CurrentSpeedSent   uint64 `json:"currentSpeedSent"`
+	CurrentSpeedRecv   uint64 `json:"currentSpeedRecv"`
+	prevBytesSent      uint64 `json:"-"`
+	prevBytesRecv      uint64 `json:"-"`
 }
 
 // PortForwardManager 管理所有端口转发
 type PortForwardManager struct {
 	mu           sync.RWMutex
 	mappings     map[string]*PortMapping
-	forwarders   map[string]*portforward.PortForwarder
-	stopChannels map[string]chan struct{}
-	app          *App
+	forwarders     map[string]*portforward.PortForwarder
+	stopChannels   map[string]chan struct{}
+	localListeners map[string]net.Listener
+	app            *App
 }
 
 // NewPortForwardManager 创建端口转发管理器
 func NewPortForwardManager(app *App) *PortForwardManager {
-	return &PortForwardManager{
-		mappings:     make(map[string]*PortMapping),
-		forwarders:   make(map[string]*portforward.PortForwarder),
-		stopChannels: make(map[string]chan struct{}),
-		app:          app,
+	pm := &PortForwardManager{
+		mappings:       make(map[string]*PortMapping),
+		forwarders:     make(map[string]*portforward.PortForwarder),
+		stopChannels:   make(map[string]chan struct{}),
+		localListeners: make(map[string]net.Listener),
+		app:            app,
+	}
+	
+	// 启动定期更新网速的协程
+	go pm.startSpeedCalculator()
+	
+	return pm
+}
+
+func (m *PortForwardManager) startSpeedCalculator() {
+	ticker := time.NewTicker(3 * time.Second)
+	for range ticker.C {
+		m.mu.Lock()
+		for _, mapping := range m.mappings {
+			if mapping.Status == "running" {
+				sent := atomic.LoadUint64(&mapping.TotalBytesSent)
+				recv := atomic.LoadUint64(&mapping.TotalBytesReceived)
+				
+				mapping.CurrentSpeedSent = (sent - mapping.prevBytesSent) / 3
+				mapping.CurrentSpeedRecv = (recv - mapping.prevBytesRecv) / 3
+				
+				mapping.prevBytesSent = sent
+				mapping.prevBytesRecv = recv
+			} else if mapping.CurrentSpeedSent > 0 || mapping.CurrentSpeedRecv > 0 {
+				mapping.CurrentSpeedSent = 0
+				mapping.CurrentSpeedRecv = 0
+			}
+		}
+		m.mu.Unlock()
 	}
 }
 
@@ -108,9 +145,15 @@ func (m *PortForwardManager) addMappingInternal(cluster, namespace, resourceType
 		ResourceType: resourceType,
 		ResourceName: resourceName,
 		RemotePort:   remotePort,
-		LocalPort:    localPort,
-		Status:       "stopped",
-		CreatedAt:    time.Now().Format(time.RFC3339),
+		LocalPort:          localPort,
+		Status:             "stopped",
+		CreatedAt:          time.Now().Format(time.RFC3339),
+		TotalBytesSent:     0,
+		TotalBytesReceived: 0,
+		CurrentSpeedSent:   0,
+		CurrentSpeedRecv:   0,
+		prevBytesSent:      0,
+		prevBytesRecv:      0,
 	}
 
 	m.mappings[id] = mapping
@@ -190,6 +233,8 @@ func (m *PortForwardManager) StopMapping(id string) error {
 	m.stopForwardingLocked(id)
 	mapping.Status = "stopped"
 	mapping.Error = ""
+	mapping.CurrentSpeedSent = 0
+	mapping.CurrentSpeedRecv = 0
 
 	return nil
 }
@@ -241,7 +286,20 @@ func (m *PortForwardManager) startForwardingLocked(mapping *PortMapping) error {
 	stopChan := make(chan struct{}, 1)
 	readyChan := make(chan struct{}, 1)
 
-	ports := []string{fmt.Sprintf("%d:%d", mapping.LocalPort, remotePortForPod)}
+	// 生成一个内部端口
+	internalPort, err := m.findAvailablePort()
+	if err != nil {
+		return fmt.Errorf("failed to find internal port: %w", err)
+	}
+
+	// 启动本地代理监听器
+	proxyListener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", mapping.LocalPort))
+	if err != nil {
+		return fmt.Errorf("failed to bind local port %d: %w", mapping.LocalPort, err)
+	}
+	m.localListeners[mapping.ID] = proxyListener
+
+	ports := []string{fmt.Sprintf("%d:%d", internalPort, remotePortForPod)}
 
 	out, errOut := io.Discard, io.Discard
 	if klog.V(2).Enabled() {
@@ -281,31 +339,95 @@ func (m *PortForwardManager) startForwardingLocked(mapping *PortMapping) error {
 		mapping.Error = ""
 		m.forwarders[mapping.ID] = forwarder
 		m.stopChannels[mapping.ID] = stopChan
-		klog.Infof("Port forwarding started: %s -> localhost:%d", mapping.ID, mapping.LocalPort)
+		
+		// 启动本地代理接收连接
+		go m.acceptAndProxy(proxyListener, mapping, internalPort)
+		
+		klog.Infof("Port forwarding started: %s -> localhost:%d (internal: %d)", mapping.ID, mapping.LocalPort, internalPort)
 		if m.app.ctx != nil {
 			runtime.EventsEmit(m.app.ctx, "mapping:started", mapping)
 		}
 		return nil
 	case fwErr := <-fwErrChan:
 		close(stopChan)
+		proxyListener.Close()
+		delete(m.localListeners, mapping.ID)
 		if fwErr != nil {
 			return fmt.Errorf("port forward failed: %w", fwErr)
 		}
 		return fmt.Errorf("port forward exited unexpectedly")
 	case <-time.After(15 * time.Second):
 		close(stopChan)
+		proxyListener.Close()
+		delete(m.localListeners, mapping.ID)
 		return fmt.Errorf("timeout waiting for port forward to be ready")
 	}
 }
 
 // stopForwardingLocked 停止端口转发（需要持有锁）
 func (m *PortForwardManager) stopForwardingLocked(id string) {
+	if listener, exists := m.localListeners[id]; exists {
+		listener.Close()
+		delete(m.localListeners, id)
+	}
 	if stopChan, exists := m.stopChannels[id]; exists {
 		close(stopChan)
 		delete(m.stopChannels, id)
 	}
 	delete(m.forwarders, id)
 	klog.Infof("Port forwarding stopped: %s", id)
+}
+
+func (m *PortForwardManager) acceptAndProxy(listener net.Listener, mapping *PortMapping, internalPort int) {
+	for {
+		clientConn, err := listener.Accept()
+		if err != nil {
+			// listener closed
+			return
+		}
+		
+		go func(clientConn net.Conn) {
+			defer clientConn.Close()
+			
+			k8sConn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", internalPort))
+			if err != nil {
+				klog.Errorf("Failed to dial internal port: %v", err)
+				return
+			}
+			defer k8sConn.Close()
+			
+			var wg sync.WaitGroup
+			wg.Add(2)
+			
+			go func() {
+				defer wg.Done()
+				// 从客户端读，发送到k8s (Sent)
+				_, _ = io.Copy(k8sConn, &countingReader{Reader: clientConn, count: &mapping.TotalBytesSent})
+			}()
+			
+			go func() {
+				defer wg.Done()
+				// 从k8s读，发送到客户端 (Received)
+				_, _ = io.Copy(clientConn, &countingReader{Reader: k8sConn, count: &mapping.TotalBytesReceived})
+			}()
+			
+			wg.Wait()
+		}(clientConn)
+	}
+}
+
+// countingReader counts bytes read
+type countingReader struct {
+	io.Reader
+	count *uint64
+}
+
+func (c *countingReader) Read(p []byte) (n int, err error) {
+	n, err = c.Reader.Read(p)
+	if n > 0 {
+		atomic.AddUint64(c.count, uint64(n))
+	}
+	return
 }
 
 // findAvailablePort 查找可用的本地端口
