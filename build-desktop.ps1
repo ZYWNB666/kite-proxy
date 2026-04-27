@@ -50,7 +50,7 @@ Write-Host ""
 # 使用 Wails 构建桌面应用
 Write-Host "4. 构建桌面应用..." -ForegroundColor Yellow
 Write-Host "   这可能需要几分钟..." -ForegroundColor Gray
-wails build -f main_desktop.go
+wails build -tags desktop -skipbindings -s
 
 if ($LASTEXITCODE -eq 0) {
     Write-Host ""
