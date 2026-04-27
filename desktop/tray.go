@@ -3,6 +3,8 @@
 package desktop
 
 import (
+	goruntime "runtime"
+
 	"github.com/energye/systray"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 	"k8s.io/klog/v2"
@@ -10,7 +12,10 @@ import (
 
 // startTray 在后台 goroutine 中启动系统托盘
 func (a *App) startTray() {
-	go systray.Run(a.onTrayReady, a.onTrayExit)
+	go func() {
+		goruntime.LockOSThread()
+		systray.Run(a.onTrayReady, a.onTrayExit)
+	}()
 }
 
 // onTrayReady 托盘就绪回调
