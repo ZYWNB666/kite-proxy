@@ -27,13 +27,13 @@ import (
 
 // PortMapping 描述一个端口映射
 type PortMapping struct {
-	ID           string `json:"id"`           // 唯一标识
-	Cluster      string `json:"cluster"`      // 集群名称
-	Namespace    string `json:"namespace"`    // 命名空间
-	ResourceType string `json:"resourceType"` // 资源类型：service 或 pod
-	ResourceName string `json:"resourceName"` // 资源名称
-	RemotePort   int    `json:"remotePort"`   // 远程端口
-	LocalPort    int    `json:"localPort"`    // 本地端口
+	ID                 string `json:"id"`           // 唯一标识
+	Cluster            string `json:"cluster"`      // 集群名称
+	Namespace          string `json:"namespace"`    // 命名空间
+	ResourceType       string `json:"resourceType"` // 资源类型：service 或 pod
+	ResourceName       string `json:"resourceName"` // 资源名称
+	RemotePort         int    `json:"remotePort"`   // 远程端口
+	LocalPort          int    `json:"localPort"`    // 本地端口
 	Status             string `json:"status"`       // 状态：running, stopped, error
 	Error              string `json:"error"`        // 错误信息
 	CreatedAt          string `json:"createdAt"`    // 创建时间
@@ -47,8 +47,8 @@ type PortMapping struct {
 
 // PortForwardManager 管理所有端口转发
 type PortForwardManager struct {
-	mu           sync.RWMutex
-	mappings     map[string]*PortMapping
+	mu             sync.RWMutex
+	mappings       map[string]*PortMapping
 	forwarders     map[string]*portforward.PortForwarder
 	stopChannels   map[string]chan struct{}
 	localListeners map[string]net.Listener
@@ -64,10 +64,10 @@ func NewPortForwardManager(app *App) *PortForwardManager {
 		localListeners: make(map[string]net.Listener),
 		app:            app,
 	}
-	
+
 	// 启动定期更新网速的协程
 	go pm.startSpeedCalculator()
-	
+
 	return pm
 }
 
@@ -79,10 +79,10 @@ func (m *PortForwardManager) startSpeedCalculator() {
 			if mapping.Status == "running" {
 				sent := atomic.LoadUint64(&mapping.TotalBytesSent)
 				recv := atomic.LoadUint64(&mapping.TotalBytesReceived)
-				
+
 				mapping.CurrentSpeedSent = (sent - mapping.prevBytesSent) / 3
 				mapping.CurrentSpeedRecv = (recv - mapping.prevBytesRecv) / 3
-				
+
 				mapping.prevBytesSent = sent
 				mapping.prevBytesRecv = recv
 			} else if mapping.CurrentSpeedSent > 0 || mapping.CurrentSpeedRecv > 0 {
@@ -139,12 +139,12 @@ func (m *PortForwardManager) addMappingInternal(cluster, namespace, resourceType
 
 	// 创建映射
 	mapping := &PortMapping{
-		ID:           id,
-		Cluster:      cluster,
-		Namespace:    namespace,
-		ResourceType: resourceType,
-		ResourceName: resourceName,
-		RemotePort:   remotePort,
+		ID:                 id,
+		Cluster:            cluster,
+		Namespace:          namespace,
+		ResourceType:       resourceType,
+		ResourceName:       resourceName,
+		RemotePort:         remotePort,
 		LocalPort:          localPort,
 		Status:             "stopped",
 		CreatedAt:          time.Now().Format(time.RFC3339),
@@ -292,8 +292,8 @@ func (m *PortForwardManager) startForwardingLocked(mapping *PortMapping) error {
 		return fmt.Errorf("failed to find internal port: %w", err)
 	}
 
-	// 启动本地代理监听器
-	proxyListener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", mapping.LocalPort))
+	// 启动本地代理监听器（绑定 0.0.0.0 使局域网内其他机器也可访问）
+	proxyListener, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", mapping.LocalPort))
 	if err != nil {
 		return fmt.Errorf("failed to bind local port %d: %w", mapping.LocalPort, err)
 	}
@@ -339,11 +339,11 @@ func (m *PortForwardManager) startForwardingLocked(mapping *PortMapping) error {
 		mapping.Error = ""
 		m.forwarders[mapping.ID] = forwarder
 		m.stopChannels[mapping.ID] = stopChan
-		
+
 		// 启动本地代理接收连接
 		go m.acceptAndProxy(proxyListener, mapping, internalPort)
-		
-		klog.Infof("Port forwarding started: %s -> localhost:%d (internal: %d)", mapping.ID, mapping.LocalPort, internalPort)
+
+		klog.Infof("Port forwarding started: %s -> 0.0.0.0:%d (internal: %d)", mapping.ID, mapping.LocalPort, internalPort)
 		if m.app.ctx != nil {
 			runtime.EventsEmit(m.app.ctx, "mapping:started", mapping)
 		}
@@ -385,32 +385,32 @@ func (m *PortForwardManager) acceptAndProxy(listener net.Listener, mapping *Port
 			// listener closed
 			return
 		}
-		
+
 		go func(clientConn net.Conn) {
 			defer clientConn.Close()
-			
+
 			k8sConn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", internalPort))
 			if err != nil {
 				klog.Errorf("Failed to dial internal port: %v", err)
 				return
 			}
 			defer k8sConn.Close()
-			
+
 			var wg sync.WaitGroup
 			wg.Add(2)
-			
+
 			go func() {
 				defer wg.Done()
 				// 从客户端读，发送到k8s (Sent)
 				_, _ = io.Copy(k8sConn, &countingReader{Reader: clientConn, count: &mapping.TotalBytesSent})
 			}()
-			
+
 			go func() {
 				defer wg.Done()
 				// 从k8s读，发送到客户端 (Received)
 				_, _ = io.Copy(clientConn, &countingReader{Reader: k8sConn, count: &mapping.TotalBytesReceived})
 			}()
-			
+
 			wg.Wait()
 		}(clientConn)
 	}
