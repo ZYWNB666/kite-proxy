@@ -27,16 +27,17 @@ import (
 
 // PortMapping 描述一个端口映射
 type PortMapping struct {
-	ID                 string `json:"id"`           // 唯一标识
-	Cluster            string `json:"cluster"`      // 集群名称
-	Namespace          string `json:"namespace"`    // 命名空间
-	ResourceType       string `json:"resourceType"` // 资源类型：service 或 pod
-	ResourceName       string `json:"resourceName"` // 资源名称
-	RemotePort         int    `json:"remotePort"`   // 远程端口
-	LocalPort          int    `json:"localPort"`    // 本地端口
-	Status             string `json:"status"`       // 状态：running, stopped, error
-	Error              string `json:"error"`        // 错误信息
-	CreatedAt          string `json:"createdAt"`    // 创建时间
+	ID                 string `json:"id"`             // 唯一标识
+	Cluster            string `json:"cluster"`        // 集群名称
+	Namespace          string `json:"namespace"`      // 命名空间
+	ResourceType       string `json:"resourceType"`   // 资源类型：service 或 pod
+	ResourceName       string `json:"resourceName"`   // 资源名称
+	RemotePort         int    `json:"remotePort"`     // 远程端口
+	LocalPort          int    `json:"localPort"`      // 本地端口
+	Status             string `json:"status"`         // 状态：running, stopped, error
+	Error              string `json:"error"`          // 错误信息
+	CreatedAt          string `json:"createdAt"`      // 创建时间
+	CurrentPodName     string `json:"currentPodName"` // 当前转发的 Pod 名（用于 Service 类型自动切换）
 	TotalBytesSent     uint64 `json:"totalBytesSent"`
 	TotalBytesReceived uint64 `json:"totalBytesReceived"`
 	CurrentSpeedSent   uint64 `json:"currentSpeedSent"`
@@ -47,22 +48,26 @@ type PortMapping struct {
 
 // PortForwardManager 管理所有端口转发
 type PortForwardManager struct {
-	mu             sync.RWMutex
-	mappings       map[string]*PortMapping
-	forwarders     map[string]*portforward.PortForwarder
-	stopChannels   map[string]chan struct{}
-	localListeners map[string]net.Listener
-	app            *App
+	mu                   sync.RWMutex
+	mappings             map[string]*PortMapping
+	forwarders           map[string]*portforward.PortForwarder
+	stopChannels         map[string]chan struct{}
+	localListeners       map[string]net.Listener
+	retryCtxCancels      map[string]context.CancelFunc
+	endpointMonitorCalls map[string]context.CancelFunc // 用于取消 Service 监听
+	app                  *App
 }
 
 // NewPortForwardManager 创建端口转发管理器
 func NewPortForwardManager(app *App) *PortForwardManager {
 	pm := &PortForwardManager{
-		mappings:       make(map[string]*PortMapping),
-		forwarders:     make(map[string]*portforward.PortForwarder),
-		stopChannels:   make(map[string]chan struct{}),
-		localListeners: make(map[string]net.Listener),
-		app:            app,
+		mappings:             make(map[string]*PortMapping),
+		forwarders:           make(map[string]*portforward.PortForwarder),
+		stopChannels:         make(map[string]chan struct{}),
+		localListeners:       make(map[string]net.Listener),
+		retryCtxCancels:      make(map[string]context.CancelFunc),
+		endpointMonitorCalls: make(map[string]context.CancelFunc),
+		app:                  app,
 	}
 
 	// 启动定期更新网速的协程
@@ -180,8 +185,8 @@ func (m *PortForwardManager) RemoveMapping(id string) error {
 		return fmt.Errorf("mapping not found")
 	}
 
-	// 停止端口转发
-	m.stopForwardingLocked(id)
+	// 停止端口转发（并取消自动重连）
+	m.stopForwardingLocked(id, true)
 
 	// 删除映射
 	delete(m.mappings, id)
@@ -230,7 +235,7 @@ func (m *PortForwardManager) StopMapping(id string) error {
 		return fmt.Errorf("mapping not found")
 	}
 
-	m.stopForwardingLocked(id)
+	m.stopForwardingLocked(id, true)
 	mapping.Status = "stopped"
 	mapping.Error = ""
 	mapping.CurrentSpeedSent = 0
@@ -241,9 +246,9 @@ func (m *PortForwardManager) StopMapping(id string) error {
 
 // startForwardingLocked 启动端口转发（需要持有锁）
 func (m *PortForwardManager) startForwardingLocked(mapping *PortMapping) error {
-	// 如果已经在运行，先停止
-	if mapping.Status == "running" {
-		m.stopForwardingLocked(mapping.ID)
+	// 如果已经在运行或处于错误状态，先清理旧资源（不取消重连 ctx，因为可能是重连调用）
+	if mapping.Status == "running" || mapping.Status == "error" {
+		m.stopForwardingLocked(mapping.ID, false)
 	}
 
 	// 获取 rest.Config
@@ -255,15 +260,18 @@ func (m *PortForwardManager) startForwardingLocked(mapping *PortMapping) error {
 	// Build target port-forward path.
 	// Kubernetes only supports pod port-forward; for Service we resolve a backend pod first.
 	var resourcePath string
+	var resolvedPodName string // 记录 Service 解析出来的 Pod 名
 	remotePortForPod := mapping.RemotePort
 	if mapping.ResourceType == "service" {
 		podName, podPort, err := m.resolveServiceToPod(restConfig, mapping.Namespace, mapping.ResourceName, mapping.RemotePort)
 		if err != nil {
 			return err
 		}
+		resolvedPodName = podName
 		remotePortForPod = podPort
 		resourcePath = fmt.Sprintf("/api/v1/namespaces/%s/pods/%s/portforward", mapping.Namespace, podName)
 	} else if mapping.ResourceType == "pod" {
+		resolvedPodName = mapping.ResourceName
 		resourcePath = fmt.Sprintf("/api/v1/namespaces/%s/pods/%s/portforward", mapping.Namespace, mapping.ResourceName)
 	} else {
 		return fmt.Errorf("unsupported resource type: %s", mapping.ResourceType)
@@ -327,6 +335,8 @@ func (m *PortForwardManager) startForwardingLocked(mapping *PortMapping) error {
 			if m.app.ctx != nil {
 				runtime.EventsEmit(m.app.ctx, "mapping:error", mapping)
 			}
+			// Pod 断开后自动重连（service 会重新解析 pod）
+			go m.scheduleReconnect(mapping.ID)
 		} else {
 			fwErrChan <- nil
 		}
@@ -337,11 +347,17 @@ func (m *PortForwardManager) startForwardingLocked(mapping *PortMapping) error {
 	case <-readyChan:
 		mapping.Status = "running"
 		mapping.Error = ""
+		mapping.CurrentPodName = resolvedPodName // 记录当前 Pod 名
 		m.forwarders[mapping.ID] = forwarder
 		m.stopChannels[mapping.ID] = stopChan
 
 		// 启动本地代理接收连接
 		go m.acceptAndProxy(proxyListener, mapping, internalPort)
+
+		// 对于 Service 类型，启动后台沐听 Service 的后端 Pod 变化，不然 Pod 重启就断
+		if mapping.ResourceType == "service" {
+			go m.monitorServiceEndpoints(mapping.ID, restConfig)
+		}
 
 		klog.Infof("Port forwarding started: %s -> 0.0.0.0:%d (internal: %d)", mapping.ID, mapping.LocalPort, internalPort)
 		if m.app.ctx != nil {
@@ -364,8 +380,19 @@ func (m *PortForwardManager) startForwardingLocked(mapping *PortMapping) error {
 	}
 }
 
-// stopForwardingLocked 停止端口转发（需要持有锁）
-func (m *PortForwardManager) stopForwardingLocked(id string) {
+// stopForwardingLocked 停止端口转发（需要持有锁）。
+// cancelReconnect=true 时同时取消正在等待中的自动重连和 Service 监听（用户主动停止/删除时使用）。
+func (m *PortForwardManager) stopForwardingLocked(id string, cancelReconnect bool) {
+	if cancelReconnect {
+		if cancel, exists := m.retryCtxCancels[id]; exists {
+			cancel()
+			delete(m.retryCtxCancels, id)
+		}
+		if cancel, exists := m.endpointMonitorCalls[id]; exists {
+			cancel()
+			delete(m.endpointMonitorCalls, id)
+		}
+	}
 	if listener, exists := m.localListeners[id]; exists {
 		listener.Close()
 		delete(m.localListeners, id)
@@ -376,6 +403,180 @@ func (m *PortForwardManager) stopForwardingLocked(id string) {
 	}
 	delete(m.forwarders, id)
 	klog.Infof("Port forwarding stopped: %s", id)
+}
+
+// scheduleReconnect 在 pod 断连后以指数退避策略自动重连。
+// 若用户主动调用 StopMapping/RemoveMapping 则取消重连。
+func (m *PortForwardManager) scheduleReconnect(id string) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	m.mu.Lock()
+	// 取消上一个还在等待中的重连（如快速连续失败）
+	if oldCancel, exists := m.retryCtxCancels[id]; exists {
+		oldCancel()
+	}
+	m.retryCtxCancels[id] = cancel
+	m.mu.Unlock()
+
+	go func() {
+		defer cancel()
+
+		backoff := 3 * time.Second
+		const maxBackoff = 60 * time.Second
+
+		for attempt := 1; attempt <= 20; attempt++ {
+			select {
+			case <-ctx.Done():
+				klog.Infof("Auto-reconnect cancelled for %s", id)
+				return
+			case <-time.After(backoff):
+			}
+
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+
+			m.mu.Lock()
+			mapping, exists := m.mappings[id]
+			if !exists || mapping.Status == "stopped" {
+				m.mu.Unlock()
+				return
+			}
+			klog.Infof("Auto-reconnecting port forwarding for %s (attempt %d/%d)...", id, attempt, 20)
+			err := m.startForwardingLocked(mapping)
+			m.mu.Unlock()
+
+			if err == nil {
+				klog.Infof("Auto-reconnect succeeded for %s after %d attempt(s)", id, attempt)
+				return
+			}
+			klog.Errorf("Auto-reconnect attempt %d failed for %s: %v", attempt, id, err)
+		}
+		klog.Errorf("Auto-reconnect exhausted (20 attempts) for %s", id)
+	}()
+}
+
+// monitorServiceEndpoints 监听 Service 的后端 Pod 列表变化。
+// 当后端 Pod 被替换（Pod 重启/滚动更新）时，自动切换转发到新的可用 Pod。
+// 这样 Service 转发就永不断裂，对用户完全透明。
+func (m *PortForwardManager) monitorServiceEndpoints(id string, restConfig *rest.Config) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	m.mu.Lock()
+	if oldCancel, exists := m.endpointMonitorCalls[id]; exists {
+		oldCancel()
+	}
+	m.endpointMonitorCalls[id] = cancel
+	m.mu.Unlock()
+
+	ticker := time.NewTicker(5 * time.Second) // 每 5 秒检查一次后端 Pod 列表
+	defer ticker.Stop()
+	defer func() {
+		m.mu.Lock()
+		delete(m.endpointMonitorCalls, id)
+		m.mu.Unlock()
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		m.mu.Lock()
+		mapping, exists := m.mappings[id]
+		if !exists || mapping.Status == "stopped" || mapping.ResourceType != "service" {
+			m.mu.Unlock()
+			return
+		}
+
+		// 获取 Service 的后端 Pod 列表
+		pods, err := m.getServiceBackendPods(restConfig, mapping.Namespace, mapping.ResourceName)
+		m.mu.Unlock()
+
+		if err != nil {
+			klog.Warningf("Failed to get backend pods for service %s/%s: %v", mapping.Namespace, mapping.ResourceName, err)
+			continue
+		}
+
+		if len(pods) == 0 {
+			klog.Warningf("No available pods for service %s/%s", mapping.Namespace, mapping.ResourceName)
+			continue
+		}
+
+		// 检查当前 Pod 是否还在后端 Pod 列表中
+		m.mu.Lock()
+		mapping, exists = m.mappings[id]
+		if !exists || mapping.Status == "stopped" {
+			m.mu.Unlock()
+			return
+		}
+
+		currentPodFound := false
+		for _, pod := range pods {
+			if pod.Name == mapping.CurrentPodName && pod.Status.Phase == corev1.PodRunning {
+				currentPodFound = true
+				break
+			}
+		}
+
+		// 如果当前 Pod 已经不在可用列表中（被替换/重启），需要切换到新 Pod
+		if !currentPodFound && mapping.Status == "running" {
+			klog.Infof("Backend pod %s for service %s/%s is no longer available, switching to new pod",
+				mapping.CurrentPodName, mapping.Namespace, mapping.ResourceName)
+
+			// 停止当前转发（不取消监听，继续监听）
+			m.stopForwardingLocked(id, false)
+			mapping.Status = "reconnecting"
+			mapping.Error = "Backend pod changed, reconnecting..."
+
+			if m.app.ctx != nil {
+				runtime.EventsEmit(m.app.ctx, "mapping:reconnecting", mapping)
+			}
+
+			// 重新建立转发到新 Pod
+			err := m.startForwardingLocked(mapping)
+			if err != nil {
+				mapping.Status = "error"
+				mapping.Error = fmt.Sprintf("Failed to switch to new backend pod: %v", err)
+				klog.Errorf("Failed to reconnect to new backend pod for service %s/%s: %v",
+					mapping.Namespace, mapping.ResourceName, err)
+				if m.app.ctx != nil {
+					runtime.EventsEmit(m.app.ctx, "mapping:error", mapping)
+				}
+			}
+		}
+		m.mu.Unlock()
+	}
+}
+
+// getServiceBackendPods 获取 Service 的后端 Pod 列表
+func (m *PortForwardManager) getServiceBackendPods(restConfig *rest.Config, namespace, serviceName string) ([]corev1.Pod, error) {
+	clientset, err := kubernetes.NewForConfig(restConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create kubernetes client: %w", err)
+	}
+
+	ctx := context.Background()
+	svc, err := clientset.CoreV1().Services(namespace).Get(ctx, serviceName, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get service %s/%s: %w", namespace, serviceName, err)
+	}
+
+	if len(svc.Spec.Selector) == 0 {
+		return nil, fmt.Errorf("service %s/%s has no selector", namespace, serviceName)
+	}
+
+	podList, err := clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labels.Set(svc.Spec.Selector).String(),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list pods for service %s/%s: %w", namespace, serviceName, err)
+	}
+
+	return podList.Items, nil
 }
 
 func (m *PortForwardManager) acceptAndProxy(listener net.Listener, mapping *PortMapping, internalPort int) {
@@ -464,7 +665,7 @@ func (m *PortForwardManager) StopAll() {
 	defer m.mu.Unlock()
 
 	for id := range m.mappings {
-		m.stopForwardingLocked(id)
+		m.stopForwardingLocked(id, true)
 	}
 
 	klog.Info("All port forwardings stopped")
