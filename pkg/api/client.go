@@ -41,6 +41,58 @@ type KubeconfigResponse struct {
 	Clusters []ClusterKubeconfig `json:"clusters"`
 }
 
+// GetProxyNamespaces fetches the namespaces that are allowed for proxying.
+func (c *Client) GetProxyNamespaces(ctx context.Context, clusterName string) ([]ClusterNamespaces, error) {
+	if c.baseURL == "" {
+		return nil, fmt.Errorf("kite server URL is not configured")
+	}
+	if c.apiKey == "" {
+		return nil, fmt.Errorf("kite API key is not configured")
+	}
+
+	endpoint := fmt.Sprintf("%s/api/v1/proxy/namespaces", c.baseURL)
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("invalid kite URL: %w", err)
+	}
+
+	if clusterName != "" {
+		q := u.Query()
+		q.Set("cluster", clusterName)
+		u.RawQuery = q.Encode()
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Authorization", c.apiKey)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request to kite server failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, parseHTTPError(resp.StatusCode, body)
+	}
+
+	var result proxyNamespacesResponse
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("failed to decode kite response: %w", err)
+	}
+
+	return result.Clusters, nil
+}
+
 // GetKubeconfigs fetches all available kubeconfigs from the kite server.
 // If clusterName is not empty, it filters to only that specific cluster.
 func (c *Client) GetKubeconfigs(ctx context.Context, clusterName string) (*KubeconfigResponse, error) {
@@ -92,7 +144,7 @@ func (c *Client) GetKubeconfigs(ctx context.Context, clusterName string) (*Kubec
 
 	// Handle non-200 responses
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("kite server returned %d: %s", resp.StatusCode, string(body))
+		return nil, parseHTTPError(resp.StatusCode, body)
 	}
 
 	// Parse JSON response

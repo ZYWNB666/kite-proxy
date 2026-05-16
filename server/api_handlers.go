@@ -52,7 +52,7 @@ func handleSetConfig(c *gin.Context) {
 func handleListClusters(c *gin.Context) {
 	clusters, err := FetchAvailableClusters()
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		respondAPIError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"clusters": clusters})
@@ -64,7 +64,7 @@ func handleListClusters(c *gin.Context) {
 func handleGetKubeconfig(c *gin.Context) {
 	clusters, err := FetchAvailableClusters()
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		respondAPIError(c, err)
 		return
 	}
 
@@ -125,7 +125,7 @@ func handleTriggerSync(c *gin.Context) {
 
 	err := globalSyncer.SyncNow()
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		respondAPIError(c, err)
 		return
 	}
 
@@ -140,8 +140,8 @@ func handlePrewarm(c *gin.Context) {
 		return
 	}
 	globalCache.ClearCluster(clusterName)
-	if _, err := globalCache.Get(clusterName); err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+	if err := globalCache.RefreshCluster(clusterName); err != nil {
+		respondAPIError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("cluster %q warmed up", clusterName)})

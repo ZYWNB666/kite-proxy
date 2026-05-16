@@ -5,9 +5,11 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"path"
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/zxh326/kite-proxy/pkg/api"
 	"k8s.io/client-go/rest"
 	"k8s.io/klog/v2"
 )
@@ -30,6 +32,9 @@ func HandleProxy(c *gin.Context) {
 
 	restCfg, err := globalCache.Get(clusterName)
 	if err != nil {
+		if handled := writeProxyUpstreamError(c, err); handled {
+			return
+		}
 		klog.Warningf("proxy: failed to get kubeconfig for cluster %q: %v", clusterName, err)
 		c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("cannot connect to cluster %q: %v", clusterName, err)})
 		return
@@ -53,6 +58,24 @@ func HandleProxy(c *gin.Context) {
 	proxyPath := c.Param("path")
 	if proxyPath == "" {
 		proxyPath = "/"
+	}
+
+	if namespace := extractNamespaceFromProxyPath(proxyPath); namespace != "" {
+		allowed, err := globalCache.IsNamespaceAllowed(clusterName, namespace)
+		if err != nil {
+			if handled := writeProxyUpstreamError(c, err); handled {
+				return
+			}
+			c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("failed to validate namespace access: %v", err)})
+			return
+		}
+		if !allowed {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error": fmt.Sprintf("namespace %s is not allowed for proxy", namespace),
+				"code":  "namespace_forbidden",
+			})
+			return
+		}
 	}
 
 	proxy := &httputil.ReverseProxy{
@@ -92,4 +115,28 @@ func singleJoiningSlash(a, b string) string {
 		return a + "/" + b
 	}
 	return a + b
+}
+
+func extractNamespaceFromProxyPath(proxyPath string) string {
+	cleaned := path.Clean("/" + proxyPath)
+	segments := strings.Split(strings.TrimPrefix(cleaned, "/"), "/")
+	for i := 0; i < len(segments)-1; i++ {
+		if segments[i] == "namespaces" && segments[i+1] != "" && segments[i+1] != "." {
+			return segments[i+1]
+		}
+	}
+	return ""
+}
+
+func writeProxyUpstreamError(c *gin.Context, err error) bool {
+	switch {
+	case api.ErrorStatus(err) == http.StatusUnauthorized:
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "API key 无效或已过期，请重新配置", "code": "unauthorized"})
+		return true
+	case api.ErrorStatus(err) == http.StatusForbidden && api.ErrorCode(err) == "proxy_forbidden":
+		c.JSON(http.StatusForbidden, gin.H{"error": "当前 API key 没有访问该集群/命名空间的代理权限", "code": "proxy_forbidden"})
+		return true
+	default:
+		return false
+	}
 }

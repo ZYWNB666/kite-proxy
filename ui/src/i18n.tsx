@@ -96,6 +96,10 @@ const translations = {
 
     // Auth
     authExpired: 'Session expired. API key is no longer valid.',
+    authInvalidOrExpired: 'API key is invalid or expired. Please reconfigure it.',
+    proxyForbidden: 'The current API key does not have proxy access to the target cluster or namespace.',
+    namespaceForbidden: 'The target namespace is outside the allowed proxy scope.',
+    kiteUnreachable: 'Unable to connect to the Kite server.',
 
     // Errors
     failedToLoadClusters: 'Failed to load clusters',
@@ -208,6 +212,10 @@ const translations = {
 
     // Auth
     authExpired: '会话已过期，API 密钥无效或已失效。',
+    authInvalidOrExpired: 'API key 无效或已过期，请重新配置。',
+    proxyForbidden: '当前 API key 没有访问该集群/命名空间的代理权限。',
+    namespaceForbidden: '目标命名空间不在允许代理的范围内。',
+    kiteUnreachable: '无法连接到 Kite 服务端。',
 
     // Errors
     failedToLoadClusters: '加载集群失败',

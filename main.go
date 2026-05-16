@@ -49,7 +49,7 @@ func envOrDefault(key, def string) string {
 
 func init() {
 	// Print banner
-	fmt.Println(`
+	fmt.Print(`
  _    _ _         ______
 | |  (_) |       (_____ \
 | |  _| |_ ___   _____) )_ __  ___  _  _  _   _

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -15,7 +16,8 @@ import (
 // The raw kubeconfig YAML is intentionally NOT stored here; only the
 // parsed rest.Config is kept so that secrets are not retained as plain text.
 type kubeconfigEntry struct {
-	restConfig *rest.Config
+	restConfig        *rest.Config
+	allowedNamespaces map[string]struct{}
 }
 
 // kubeconfigCache is an in-memory store of cluster → *rest.Config.
@@ -40,26 +42,96 @@ func (c *kubeconfigCache) Get(clusterName string) (*rest.Config, error) {
 	}
 	c.mu.RUnlock()
 
-	// Not cached – fetch from kite server, then store under write lock.
-	// Multiple goroutines might race here; only the first to acquire the
-	// write lock will insert; subsequent ones will find the value already set.
-	restCfg, err := fetchRestConfig(clusterName)
-	if err != nil {
+	if err := c.RefreshCluster(clusterName); err != nil {
 		return nil, fmt.Errorf("failed to fetch kubeconfig for cluster %q: %w", clusterName, err)
 	}
 
-	c.mu.Lock()
-	// Double-check: another goroutine may have inserted the entry while we
-	// were fetching (after we released the read lock above).
-	if entry, ok := c.entries[clusterName]; ok {
-		c.mu.Unlock()
-		return entry.restConfig, nil
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	entry, ok := c.entries[clusterName]
+	if !ok {
+		return nil, fmt.Errorf("cluster %q not found in cache after refresh", clusterName)
 	}
-	c.entries[clusterName] = &kubeconfigEntry{restConfig: restCfg}
+	return entry.restConfig, nil
+}
+
+// GetAllowedNamespaces returns the allowed namespaces for a cluster.
+func (c *kubeconfigCache) GetAllowedNamespaces(clusterName string) ([]string, error) {
+	c.mu.RLock()
+	entry, ok := c.entries[clusterName]
+	c.mu.RUnlock()
+	if !ok {
+		if err := c.RefreshCluster(clusterName); err != nil {
+			return nil, err
+		}
+		c.mu.RLock()
+		entry = c.entries[clusterName]
+		c.mu.RUnlock()
+	}
+	if entry == nil {
+		return nil, fmt.Errorf("cluster %q not found", clusterName)
+	}
+
+	namespaces := make([]string, 0, len(entry.allowedNamespaces))
+	for namespace := range entry.allowedNamespaces {
+		namespaces = append(namespaces, namespace)
+	}
+	sort.Strings(namespaces)
+	return namespaces, nil
+}
+
+// IsNamespaceAllowed reports whether a namespace is allowed for a cluster.
+// Empty namespace means the request is cluster-scoped and should pass through.
+func (c *kubeconfigCache) IsNamespaceAllowed(clusterName, namespace string) (bool, error) {
+	if namespace == "" {
+		return true, nil
+	}
+
+	allowedNamespaces, err := c.GetAllowedNamespaces(clusterName)
+	if err != nil {
+		return false, err
+	}
+	for _, allowed := range allowedNamespaces {
+		if allowed == namespace {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// RefreshAll refreshes kubeconfigs and namespace permissions for all clusters atomically.
+func (c *kubeconfigCache) RefreshAll() error {
+	entries, err := fetchClusterEntries("")
+	if err != nil {
+		return err
+	}
+
+	c.mu.Lock()
+	c.entries = entries
 	c.mu.Unlock()
 
-	klog.Infof("Loaded kubeconfig for cluster %q into memory cache", clusterName)
-	return restCfg, nil
+	klog.Infof("Refreshed %d cluster kubeconfig(s) and namespace permission set(s)", len(entries))
+	return nil
+}
+
+// RefreshCluster refreshes a single cluster atomically.
+func (c *kubeconfigCache) RefreshCluster(clusterName string) error {
+	entries, err := fetchClusterEntries(clusterName)
+	if err != nil {
+		return err
+	}
+
+	entry, ok := entries[clusterName]
+	if !ok {
+		return fmt.Errorf("cluster %q not found in kite response", clusterName)
+	}
+
+	c.mu.Lock()
+	c.entries[clusterName] = entry
+	c.mu.Unlock()
+
+	klog.Infof("Refreshed kubeconfig and namespace permissions for cluster %q", clusterName)
+	return nil
 }
 
 // Clear removes all cached kubeconfigs (e.g. after config change).
@@ -88,64 +160,75 @@ func (c *kubeconfigCache) ListCached() []string {
 	return names
 }
 
-// fetchRestConfig calls the kite server's proxy kubeconfig endpoint and returns
-// a parsed rest.Config for the requested cluster.
-// The raw YAML is used only transiently inside this function and is not stored.
-func fetchRestConfig(clusterName string) (*rest.Config, error) {
+// fetchClusterEntries calls the kite server and atomically builds in-memory
+// kubeconfig + allowed namespace entries.
+func fetchClusterEntries(clusterName string) (map[string]*kubeconfigEntry, error) {
 	cfg := GetConfig()
+	if cfg.KiteURL == "" || cfg.APIKey == "" {
+		return nil, fmt.Errorf("kite server is not configured")
+	}
 
-	// Create API client
 	client := api.NewClient(cfg.KiteURL, cfg.APIKey)
 
-	// Fetch kubeconfig with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	clusterKubeconfig, err := client.GetClusterKubeconfig(ctx, clusterName)
+	kubeconfigResp, err := client.GetKubeconfigs(ctx, clusterName)
+	if err != nil {
+		return nil, err
+	}
+	proxyNamespaces, err := client.GetProxyNamespaces(ctx, clusterName)
 	if err != nil {
 		return nil, err
 	}
 
-	// Parse kubeconfig YAML into rest.Config
-	restConfig, err := api.ParseKubeconfig(clusterKubeconfig.Kubeconfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse kubeconfig for cluster %q: %w", clusterName, err)
+	namespaceMap := make(map[string]map[string]struct{}, len(proxyNamespaces))
+	for _, cluster := range proxyNamespaces {
+		allowed := make(map[string]struct{}, len(cluster.Namespaces))
+		for _, namespace := range cluster.Namespaces {
+			allowed[namespace] = struct{}{}
+		}
+		namespaceMap[cluster.Name] = allowed
 	}
 
-	// Raw YAML (clusterKubeconfig.Kubeconfig) is discarded here – only the parsed config is kept.
-	return restConfig, nil
+	entries := make(map[string]*kubeconfigEntry, len(kubeconfigResp.Clusters))
+	for _, cluster := range kubeconfigResp.Clusters {
+		restConfig, err := api.ParseKubeconfig(cluster.Kubeconfig)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse kubeconfig for cluster %q: %w", cluster.Name, err)
+		}
+		entries[cluster.Name] = &kubeconfigEntry{
+			restConfig:        restConfig,
+			allowedNamespaces: namespaceMap[cluster.Name],
+		}
+		if entries[cluster.Name].allowedNamespaces == nil {
+			entries[cluster.Name].allowedNamespaces = make(map[string]struct{})
+		}
+	}
+
+	return entries, nil
 }
 
 // FetchAvailableClusters calls the kite server and returns the list of
 // cluster names that are available for proxying (based on RBAC permissions).
 func FetchAvailableClusters() ([]ClusterInfo, error) {
-	cfg := GetConfig()
-
-	// Create API client
-	client := api.NewClient(cfg.KiteURL, cfg.APIKey)
-
-	// Fetch all available kubeconfigs with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	resp, err := client.GetKubeconfigs(ctx, "")
-	if err != nil {
+	if err := globalCache.RefreshAll(); err != nil {
 		return nil, err
 	}
 
-	// Build ClusterInfo list with cache status
-	clusters := make([]ClusterInfo, 0, len(resp.Clusters))
-	for _, cl := range resp.Clusters {
-		cached := false
-		globalCache.mu.RLock()
-		_, cached = globalCache.entries[cl.Name]
-		globalCache.mu.RUnlock()
+	globalCache.mu.RLock()
+	defer globalCache.mu.RUnlock()
 
+	clusters := make([]ClusterInfo, 0, len(globalCache.entries))
+	for name := range globalCache.entries {
 		clusters = append(clusters, ClusterInfo{
-			Name:   cl.Name,
-			Cached: cached,
+			Name:   name,
+			Cached: true,
 		})
 	}
+	sort.Slice(clusters, func(i, j int) bool {
+		return clusters[i].Name < clusters[j].Name
+	})
 
 	return clusters, nil
 }

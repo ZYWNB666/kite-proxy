@@ -39,7 +39,7 @@ function Nav({ configured }: { configured: boolean }) {
 function AppInner() {
   const { t } = useI18n()
   const [config, setConfig] = useState<Config | null>(null)
-  const [unauthorized, setUnauthorized] = useState(false)
+  const [authError, setAuthError] = useState<{ code: string; message: string } | null>(null)
 
   async function loadConfig() {
     try {
@@ -58,28 +58,36 @@ function AppInner() {
   useEffect(() => {
     if (!isDesktop) return
     // @ts-ignore
-    const unlisten = window.runtime?.EventsOn?.('auth:unauthorized', () => {
-      setUnauthorized(true)
-      toast.error(t.authExpired, { duration: 0, id: 'auth-expired' })
+    const unlistenUnauthorized = window.runtime?.EventsOn?.('auth:unauthorized', () => {
+      setAuthError({ code: 'unauthorized', message: t.authInvalidOrExpired })
+      toast.error(t.authInvalidOrExpired, { duration: 0, id: 'auth-error' })
+    })
+    // @ts-ignore
+    const unlistenError = window.runtime?.EventsOn?.('auth:error', (payload) => {
+      const code = payload?.code || 'kite_unreachable'
+      const message = mapAuthMessage(code, payload?.message, t)
+      setAuthError({ code, message })
+      toast.error(message, { duration: 0, id: 'auth-error' })
     })
     return () => {
-      if (typeof unlisten === 'function') unlisten()
+      if (typeof unlistenUnauthorized === 'function') unlistenUnauthorized()
+      if (typeof unlistenError === 'function') unlistenError()
     }
-  }, [t.authExpired])
+  }, [t])
 
   const configured = config?.configured ?? false
 
-  if (unauthorized) {
+  if (authError) {
     return (
       <div className="min-h-screen bg-gray-50 dark:bg-gray-950 flex items-center justify-center">
         <div className="text-center max-w-sm p-8 bg-white dark:bg-gray-900 rounded-xl shadow border border-gray-200 dark:border-gray-700">
           <div className="text-4xl mb-4">🔒</div>
           <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-2">
-            {t.authExpired}
+            {authError.message}
           </h2>
           <button
             onClick={() => {
-              setUnauthorized(false)
+              setAuthError(null)
               void loadConfig()
             }}
             className="mt-4 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700"
@@ -130,6 +138,25 @@ function AppInner() {
       </div>
     </BrowserRouter>
   )
+}
+
+function mapAuthMessage(
+  code: string,
+  rawMessage: string | undefined,
+  t: ReturnType<typeof useI18n>['t']
+) {
+  switch (code) {
+    case 'unauthorized':
+      return t.authInvalidOrExpired
+    case 'proxy_forbidden':
+      return t.proxyForbidden
+    case 'namespace_forbidden':
+      return t.namespaceForbidden
+    case 'kite_unreachable':
+      return rawMessage || t.kiteUnreachable
+    default:
+      return rawMessage || t.kiteUnreachable
+  }
 }
 
 export default function App() {

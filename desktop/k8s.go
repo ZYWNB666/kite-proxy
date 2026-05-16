@@ -3,6 +3,7 @@ package desktop
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	"github.com/zxh326/kite-proxy/pkg/api"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -45,35 +46,34 @@ func (a *App) GetNamespaces(clusterName string) ([]NamespaceInfo, error) {
 	if err := a.checkAuth(); err != nil {
 		return nil, err
 	}
-
-	// 获取集群的 rest.Config
-	restConfig, err := a.getOrFetchRestConfig(clusterName)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get cluster config: %w", err)
+	if clusterName == "" {
+		return nil, fmt.Errorf("cluster name is required")
+	}
+	if a.client == nil {
+		return nil, fmt.Errorf("not configured")
 	}
 
-	// 创建 Kubernetes 客户端
-	clientset, err := kubernetes.NewForConfig(restConfig)
+	proxyNamespaces, err := a.client.GetProxyNamespaces(context.Background(), clusterName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create kubernetes client: %w", err)
+		return nil, fmt.Errorf("failed to fetch proxy namespaces: %w", err)
 	}
 
-	// 获取所有 namespaces
-	ctx := context.Background()
-	nsList, err := clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("failed to list namespaces: %w", err)
-	}
-
-	namespaces := make([]NamespaceInfo, 0, len(nsList.Items))
-	for _, ns := range nsList.Items {
-		namespaces = append(namespaces, NamespaceInfo{
-			Name: ns.Name,
+	for _, cluster := range proxyNamespaces {
+		if cluster.Name != clusterName {
+			continue
+		}
+		namespaces := make([]NamespaceInfo, 0, len(cluster.Namespaces))
+		for _, ns := range cluster.Namespaces {
+			namespaces = append(namespaces, NamespaceInfo{Name: ns})
+		}
+		sort.Slice(namespaces, func(i, j int) bool {
+			return namespaces[i].Name < namespaces[j].Name
 		})
+		klog.Infof("Found %d allowed namespaces in cluster %s", len(namespaces), clusterName)
+		return namespaces, nil
 	}
 
-	klog.Infof("Found %d namespaces in cluster %s", len(namespaces), clusterName)
-	return namespaces, nil
+	return []NamespaceInfo{}, nil
 }
 
 // GetServices 获取指定集群和 namespace 的所有 services

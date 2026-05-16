@@ -1,11 +1,9 @@
 package server
 
 import (
-	"context"
 	"sync"
 	"time"
 
-	"github.com/zxh326/kite-proxy/pkg/api"
 	"k8s.io/klog/v2"
 )
 
@@ -105,14 +103,7 @@ func (s *Syncer) performSync() {
 
 	klog.V(2).Info("Starting automatic sync with kite server")
 
-	// Create API client
-	client := api.NewClient(cfg.KiteURL, cfg.APIKey)
-
-	// Ping kite server to check connectivity
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	err := client.Ping(ctx)
+	err := globalCache.RefreshAll()
 	if err != nil {
 		klog.Warningf("Sync failed: %v", err)
 		s.mu.Lock()
@@ -121,7 +112,7 @@ func (s *Syncer) performSync() {
 		return
 	}
 
-	klog.V(2).Info("Sync successful: kite server is reachable")
+	klog.V(2).Info("Sync successful: kubeconfig and namespace cache refreshed")
 	s.mu.Lock()
 	s.lastSyncErr = nil
 	s.mu.Unlock()
@@ -135,11 +126,7 @@ func (s *Syncer) SyncNow() error {
 		return nil // not an error, just not configured
 	}
 
-	client := api.NewClient(cfg.KiteURL, cfg.APIKey)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	err := client.Ping(ctx)
+	err := globalCache.RefreshAll()
 	s.mu.Lock()
 	s.lastSyncErr = err
 	s.mu.Unlock()

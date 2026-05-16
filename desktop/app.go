@@ -3,6 +3,7 @@ package desktop
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -309,9 +310,7 @@ func (a *App) checkAuth() error {
 		return nil
 	}
 	if err := a.client.Ping(context.Background()); err != nil {
-		if a.ctx != nil {
-			runtime.EventsEmit(a.ctx, "auth:unauthorized")
-		}
+		a.emitAuthError(err)
 		return fmt.Errorf("API key validation failed: %w", err)
 	}
 	a.authMu.Lock()
@@ -335,9 +334,7 @@ func (a *App) startAuthLoop() {
 				a.authMu.Lock()
 				a.lastAuthCheck = time.Time{} // 清除缓存，强制下次重新校验
 				a.authMu.Unlock()
-				if a.ctx != nil {
-					runtime.EventsEmit(a.ctx, "auth:unauthorized")
-				}
+				a.emitAuthError(err)
 			} else {
 				a.authMu.Lock()
 				a.lastAuthCheck = time.Now()
@@ -473,6 +470,30 @@ func (a *App) GetKubeconfigYAML() (string, error) {
 func (a *App) ShowNotification(title, message string) {
 	runtime.EventsEmit(a.ctx, "notification", map[string]string{
 		"title":   title,
+		"message": message,
+	})
+}
+
+func (a *App) emitAuthError(err error) {
+	if a.ctx == nil {
+		return
+	}
+
+	code := "kite_unreachable"
+	message := fmt.Sprintf("无法连接到 Kite 服务端：%v", err)
+
+	switch {
+	case errors.Is(err, api.ErrUnauthorized):
+		code = "unauthorized"
+		message = "API key 无效或已过期，请重新配置"
+		runtime.EventsEmit(a.ctx, "auth:unauthorized")
+	case errors.Is(err, api.ErrProxyForbidden):
+		code = "proxy_forbidden"
+		message = "当前 API key 没有访问该集群/命名空间的代理权限"
+	}
+
+	runtime.EventsEmit(a.ctx, "auth:error", map[string]string{
+		"code":    code,
 		"message": message,
 	})
 }
